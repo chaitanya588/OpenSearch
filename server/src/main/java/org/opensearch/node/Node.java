@@ -1153,6 +1153,9 @@ public class Node implements Closeable {
                 workloadGroupService
             );
 
+            AutoForceMergeManager autoForceMergeManager = new AutoForceMergeManager(threadPool,
+                monitorService.osService(), indicesService);
+
             final Collection<SecureSettingsFactory> secureSettingsFactories = pluginsService.filterPlugins(Plugin.class)
                 .stream()
                 .map(p -> p.getSecureSettingFactory(settings))
