@@ -32,7 +32,6 @@ import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.coord.Segment;
 import org.opensearch.index.store.Store;
-import org.opensearch.index.translog.TranslogDeletionPolicy;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -40,8 +39,8 @@ import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
-import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
 public class LuceneCommitEngine implements Committer {
@@ -54,20 +53,14 @@ public class LuceneCommitEngine implements Committer {
 
     public LuceneCommitEngine(
         Store store,
-        TranslogDeletionPolicy translogDeletionPolicy,
-        LongSupplier globalCheckpointSupplier,
-        boolean primaryMode
+        CombinedDeletionPolicy combinedDeletionPolicy,
+        IndexWriter indexWriter
     ) throws IOException {
         this.logger = Loggers.getLogger(LuceneCommitEngine.class, store.shardId());
-        this.combinedDeletionPolicy = new CombinedDeletionPolicy(logger, translogDeletionPolicy, null, globalCheckpointSupplier);
-        IndexWriterConfig indexWriterConfig = new IndexWriterConfig();
-        indexWriterConfig.setIndexDeletionPolicy(combinedDeletionPolicy);
-        indexWriterConfig.setMergePolicy(NoMergePolicy.INSTANCE);
+        this.combinedDeletionPolicy = combinedDeletionPolicy;
         this.store = store;
+        this.indexWriter = indexWriter;
         this.lastCommittedSegmentInfos = store.readLastCommittedSegmentsInfo();
-        if (primaryMode) {
-            this.indexWriter = new IndexWriter(store.directory(), indexWriterConfig);
-        }
     }
 
     @Override
@@ -78,7 +71,11 @@ public class LuceneCommitEngine implements Committer {
                 continue;
             }
             try {
-                indexWriter.addIndexes(NIOFSDirectory.open(Path.of(writerFileSet.getDirectory())));
+                Path writerDir = Path.of(indexWriter.getDirectory().toString()).toAbsolutePath().normalize();
+                Path segmentDir = Path.of(writerFileSet.getDirectory()).toAbsolutePath().normalize();
+                if (!writerDir.equals(segmentDir)) {
+                    indexWriter.addIndexes(NIOFSDirectory.open(segmentDir));
+                }
                 writerFileSet.setRefreshed();
             } catch (IOException e) {
                 throw new RuntimeException("Failed to add Lucene index at " + writerFileSet.getDirectory(), e);
@@ -94,7 +91,8 @@ public class LuceneCommitEngine implements Committer {
 
                 String generationAttr = info.info.getAttribute("writer_generation");
                 if (generationAttr == null) {
-                    throw new RuntimeException("Failed to fetch writer generation from Lucene writer.");
+                    // Pre-existing segment from a prior commit — no reconciliation needed
+                    continue;
                 }
 
                 long writerGeneration = Long.parseLong(generationAttr);

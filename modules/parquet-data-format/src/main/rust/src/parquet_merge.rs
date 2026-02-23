@@ -209,6 +209,11 @@ fn process_files(
             .and_then(|n| n.to_str())
             .unwrap_or(path)
             .to_string();
+        // Extract writer generation from filename (e.g. "_parquet_file_generation_12.parquet"
+        // or "_parquet_file_generation_merged_12.parquet") so it matches the Lucene segment's
+        // "writer_generation" attribute used by CustomOneMerge for cross-format row ID mapping.
+        let old_file_id = extract_writer_generation(path)
+            .unwrap_or_else(|| old_file_id);
 
         let file = File::open(path)
             .map_err(|e| ParquetMergeError::InvalidFile(format!("{}: {}", path, e)))?;
@@ -310,6 +315,17 @@ fn catch_unwind<F: FnOnce() -> Result<(Vec<RowIdMappingData>, String), Box<dyn E
     f: F
 ) -> Result<Result<(Vec<RowIdMappingData>, String), Box<dyn Error>>, Box<dyn Any + Send>> {
     std::panic::catch_unwind(AssertUnwindSafe(f))
+}
+
+// Extract writer generation number from a parquet filename.
+// Handles both "_parquet_file_generation_<N>.parquet" and
+// "_parquet_file_generation_merged_<N>.parquet".
+fn extract_writer_generation(path: &str) -> Option<String> {
+    let filename = std::path::Path::new(path)
+        .file_stem()  // strip .parquet
+        .and_then(|n| n.to_str())?;
+    // stem is e.g. "_parquet_file_generation_12" or "_parquet_file_generation_merged_12"
+    filename.rsplit('_').next().map(|s| s.to_string())
 }
 
 // Create Java RowIdMapping object

@@ -23,4 +23,12 @@ public class RowId {
         this.rowId = rowId;
         this.fileId = fileId;
     }
+
+    public String getFileId() {
+        return fileId;
+    }
+
+    public long getRowId() {
+        return rowId;
+    }
 }

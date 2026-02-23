@@ -8,6 +8,10 @@
 
 package org.opensearch.index.engine.exec.merge;
 
+import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.opensearch.index.engine.exec.coord.Segment;
 
 import org.apache.logging.log4j.Logger;
@@ -24,6 +28,7 @@ import org.opensearch.index.engine.exec.coord.CompositeEngine;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -33,6 +38,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.apache.lucene.index.*;
+import org.apache.lucene.store.*;
+import org.apache.lucene.document.*;
 
 public abstract class MergeHandler {
 
@@ -46,6 +54,101 @@ public abstract class MergeHandler {
     private final Set<Segment> currentlyMergingSegments = new HashSet<>();
     private final Logger logger;
     private final ShardId shardId;
+
+//        public static void main(String[] args) throws Exception {
+//            String indexPath = "/Volumes/workplace/OpenSource/MustangOpenSearchDevelopment/OpenSearch/build/" +
+//                "testclusters/runTask-0/data/nodes/0/indices/2OMQ7arMSUOaxV5kIU4Y2A/0/index/";
+//
+//            try (Directory dir = FSDirectory.open(Paths.get(indexPath));
+//                 DirectoryReader reader = DirectoryReader.open(dir)) {
+//
+//                System.out.println("Total docs: " + reader.numDocs());
+//
+//                // Print index schema
+//                System.out.println("\n=== Index Schema ===");
+//                for (LeafReaderContext context : reader.leaves()) {
+//                    for (FieldInfo fieldInfo : context.reader().getFieldInfos()) {
+//                        System.out.println("Field: " + fieldInfo.name +
+//                            ", DocValues: " + fieldInfo.getDocValuesType() +
+//                            ", IndexOptions: " + fieldInfo.getIndexOptions());
+//                    }
+//                    break; // Only need one segment
+//                }
+//                System.out.println("===================\n");
+//
+//                int segmentIdx = 0;
+//                for (LeafReaderContext context : reader.leaves()) {
+//                    LeafReader leafReader = context.reader();
+//                    StoredFields storedFields = leafReader.storedFields();
+//                    System.out.println("\n=== Segment " + segmentIdx + " (" + leafReader + ") ===");
+//
+//                    // Debug: Check which fields have DocValues in this segment
+//                    System.out.println("Fields with DocValues in this segment:");
+//                    for (FieldInfo fieldInfo : leafReader.getFieldInfos()) {
+//                        if (fieldInfo.getDocValuesType() != DocValuesType.NONE) {
+//                            if (fieldInfo.getDocValuesType() == DocValuesType.SORTED_NUMERIC) {
+//                                NumericDocValues dv = leafReader.getNumericDocValues(fieldInfo.name);
+//                                System.out.println("  " + fieldInfo.name + ": " + fieldInfo.getDocValuesType() + " (dv=" + (dv != null ? "present" : "NULL") + ")");
+//                            } else {
+//                                System.out.println("  " + fieldInfo.name + ": " + fieldInfo.getDocValuesType());
+//                            }
+//                        }
+//                    }
+//
+//                    for (int i = 0; i < leafReader.maxDoc(); i++) {
+//                        if (leafReader.getLiveDocs() != null && !leafReader.getLiveDocs().get(i)) continue;
+//
+//                        System.out.println("\nDoc " + (context.docBase + i) + " (local: " + i + "):");
+//
+//                        Document doc = storedFields.document(i);
+//
+//                        // Print ALL stored fields
+//                        System.out.println("  Stored fields in document:");
+//                        for (IndexableField field : doc.getFields()) {
+//                            System.out.println("    " + field.name() + ": " + field.stringValue() + " (binary: " + (field.binaryValue() != null) + ")");
+//                        }
+//
+//                        // Decode _id
+//                        IndexableField idField = doc.getField("_id");
+//                        if (idField != null && idField.binaryValue() != null) {
+//                            org.apache.lucene.util.BytesRef bytesRef = idField.binaryValue();
+//                            String id = org.opensearch.index.mapper.Uid.decodeId(bytesRef.bytes, bytesRef.offset, bytesRef.length);
+//                            System.out.println("  _id: " + id);
+//                        }
+//
+//                        // Read all fields from DocValues
+//                        for (FieldInfo fieldInfo : leafReader.getFieldInfos()) {
+//                            String fieldName = fieldInfo.name;
+//                            if (fieldName.startsWith("_")) continue;
+//
+//                            if (fieldInfo.getDocValuesType() == DocValuesType.SORTED_NUMERIC) {
+//                                SortedNumericDocValues dv = leafReader.getSortedNumericDocValues(fieldName);
+//                                if (dv != null && dv.advanceExact(i)) {
+//                                    long value = dv.nextValue();
+//                                    if (fieldName.equals("score")) {
+//                                        System.out.println("  " + fieldName + " (DV): " + Double.longBitsToDouble(value));
+//                                    } else if (fieldName.equals("active")) {
+//                                        System.out.println("  " + fieldName + " (DV): " + (value == 1));
+//                                    } else if (fieldName.equals("created_date")) {
+//                                        System.out.println("  " + fieldName + " (DV): " + value + " (epoch millis)");
+//                                    } else {
+//                                        System.out.println("  " + fieldName + " (DV): " + value);
+//                                    }
+//                                }
+//                            } else if (fieldInfo.getDocValuesType() == DocValuesType.SORTED_SET) {
+//                                SortedSetDocValues dv = leafReader.getSortedSetDocValues(fieldName);
+//                                if (dv != null && dv.advanceExact(i)) {
+//                                    long ord = dv.nextOrd();
+//                                    if (ord != -1) System.out.println("  " + fieldName + " (DV): " + dv.lookupOrd(ord).utf8ToString());
+//                                }
+//                            }
+//                        }
+//                    }
+//                    segmentIdx++;
+//                }
+//            }
+//        }
+
 
     public MergeHandler(
         CompositeEngine compositeEngine,

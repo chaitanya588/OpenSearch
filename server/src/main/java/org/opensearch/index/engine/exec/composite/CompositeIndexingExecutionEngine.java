@@ -56,7 +56,7 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
             dataFormats.add(dataSourcePlugin.getDataFormat());
             delegates.add(dataSourcePlugin.indexingEngine(engineConfig, mapperService, shardPath));
         });
-        this.dataFormat = new Any(dataFormats, dataFormats.getFirst());
+        this.dataFormat = new Any(dataFormats, dataFormats.get(1));
         this.dataFormatWriterPool = new CompositeDataFormatWriterPool(
             () -> new CompositeDataFormatWriter(this, writerGeneration.getAndIncrement()),
             LinkedList::new,

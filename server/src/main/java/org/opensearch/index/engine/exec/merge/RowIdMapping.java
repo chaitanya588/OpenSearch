@@ -9,6 +9,7 @@
 package org.opensearch.index.engine.exec.merge;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
@@ -20,6 +21,10 @@ public final class RowIdMapping {
     public RowIdMapping(Map<RowId, Long> mapping, String fileId) {
         this.mapping = Collections.unmodifiableMap(Objects.requireNonNull(mapping, "mapping cannot be null"));
         this.fileId = Objects.requireNonNull(fileId, "fileId cannot be null");
+    }
+
+    public Map<RowId, Long> getMapping() {
+        return mapping;
     }
 
     public long getNewRowId(RowId oldRowId) {
