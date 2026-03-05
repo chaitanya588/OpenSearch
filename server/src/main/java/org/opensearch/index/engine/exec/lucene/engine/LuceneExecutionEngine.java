@@ -9,6 +9,7 @@
 package org.opensearch.index.engine.exec.lucene.engine;
 
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.NoMergePolicy;
@@ -178,8 +179,8 @@ public class LuceneExecutionEngine implements IndexingExecutionEngine<DataFormat
     // --- Committer delegation ---
 
     @Override
-    public void addLuceneIndexes(List<Segment> segments) {
-        luceneCommitEngine.addLuceneIndexes(segments);
+    public DirectoryReader addLuceneIndexes(List<Segment> segments) {
+        return luceneCommitEngine.addLuceneIndexes(segments);
     }
 
     @Override

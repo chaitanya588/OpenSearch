@@ -8,18 +8,20 @@
 
 package org.opensearch.index.engine.exec.commit;
 
+import org.apache.lucene.index.DirectoryReader;
 import org.opensearch.index.engine.CommitStats;
 import org.opensearch.index.engine.SafeCommitInfo;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.coord.Segment;
 
 import java.io.Closeable;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
 public interface Committer extends Closeable {
 
-    void addLuceneIndexes(List<Segment> segments);
+    DirectoryReader addLuceneIndexes(List<Segment> segments);
 
     CommitPoint commit(Iterable<Map.Entry<String, String>> commitData, CatalogSnapshot catalogSnapshot);
 
@@ -28,4 +30,6 @@ public interface Committer extends Closeable {
     CommitStats getCommitStats();
 
     SafeCommitInfo getSafeCommitInfo();
+
+    default void closeCurrentReader() throws IOException, IOException {}
 }

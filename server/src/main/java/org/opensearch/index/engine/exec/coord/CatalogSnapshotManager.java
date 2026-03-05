@@ -10,10 +10,12 @@ package org.opensearch.index.engine.exec.coord;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.index.DirectoryReader;
 import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.RefreshResult;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.commit.Committer;
+import org.opensearch.index.engine.exec.commit.LuceneCommitEngine;
 import org.opensearch.index.engine.exec.merge.MergeResult;
 import org.opensearch.index.engine.exec.merge.OneMerge;
 import org.opensearch.index.shard.ShardPath;
@@ -38,6 +40,7 @@ public class CatalogSnapshotManager {
     private final Committer compositeEngineCommitter;
     private final Map<Long, CompositeEngineCatalogSnapshot> catalogSnapshotMap;
     private final AtomicReference<IndexFileDeleter> indexFileDeleter;
+    private Map<Long, DirectoryReader> directoryReaderMap = new HashMap<Long, DirectoryReader>();
 
     public CatalogSnapshotManager(CompositeEngine compositeEngine, Committer compositeEngineCommitter, ShardPath shardPath)
         throws IOException {
@@ -137,8 +140,8 @@ public class CatalogSnapshotManager {
         advanceCatalogSnapshot(segmentList);
     }
 
-    private synchronized void advanceCatalogSnapshot(List<Segment> segments) {
-        compositeEngineCommitter.addLuceneIndexes(segments);
+    private synchronized void advanceCatalogSnapshot(List<Segment> segments)  {
+        DirectoryReader reader = compositeEngineCommitter.addLuceneIndexes(segments);
         CompositeEngineCatalogSnapshot catalogSnapshot = new CompositeEngineCatalogSnapshot(
             latestCatalogSnapshot.getId() + 1,
             latestCatalogSnapshot.getVersion() + 1,
@@ -149,8 +152,17 @@ public class CatalogSnapshotManager {
         catalogSnapshotMap.put(catalogSnapshot.getId(), catalogSnapshot);
         if (latestCatalogSnapshot != null) {
             latestCatalogSnapshot.decRef();
+            DirectoryReader reader1 = directoryReaderMap.remove(latestCatalogSnapshot.getId());
+            if (reader1 != null) {
+                try {
+                    reader1.close();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
         }
         latestCatalogSnapshot = catalogSnapshot;
+        directoryReaderMap.put(latestCatalogSnapshot.getId(), reader);
     }
 
     private Segment getSegment(Map<DataFormat, WriterFileSet> writerFileSetMap) {

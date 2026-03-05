@@ -64,7 +64,7 @@ public class LuceneCommitEngine implements Committer {
     }
 
     @Override
-    public synchronized void addLuceneIndexes(List<Segment> segments) {
+    public synchronized DirectoryReader addLuceneIndexes(List<Segment> segments) {
         for (Segment segment : segments) {
             WriterFileSet writerFileSet = segment.getDFGroupedSearchableFiles().get(DataFormat.LUCENE.name());
             if (writerFileSet == null || writerFileSet.isRefreshed()) {
@@ -85,7 +85,8 @@ public class LuceneCommitEngine implements Committer {
         final Map<Long, Segment> segmentByGeneration =
             segments.stream().collect(Collectors.toMap(Segment::getGeneration, Function.identity()));
 
-        try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {
+        try {
+            DirectoryReader reader = DirectoryReader.open(indexWriter);
             for (LeafReaderContext leaf : reader.getContext().leaves()) {
                 SegmentCommitInfo info = Lucene.segmentReader(leaf.reader()).getSegmentInfo();
 
@@ -105,6 +106,7 @@ public class LuceneCommitEngine implements Committer {
                     );
                 }
             }
+            return reader;
         } catch (IOException e) {
             throw new RuntimeException("Failed to reconcile Lucene segments.", e);
         }
