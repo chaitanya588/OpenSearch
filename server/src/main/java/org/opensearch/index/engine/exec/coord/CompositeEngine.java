@@ -823,6 +823,10 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
     }
 
     public synchronized void applyMergeChanges(MergeResult mergeResult, OneMerge oneMerge) {
+        if (isClosed.get()) {
+            logger.debug("Engine is closed, skipping merge result application");
+            return;
+        }
         try {
             catalogSnapshotManager.applyMergeResults(mergeResult, oneMerge);
             invokeRefreshListeners(true);

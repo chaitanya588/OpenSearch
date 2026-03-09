@@ -37,7 +37,7 @@ struct NativeParquetWriter;
 impl NativeParquetWriter {
 
     fn create_writer(filename: String, schema_address: i64) -> Result<(), Box<dyn std::error::Error>> {
-        log_info!("[RUST] create_writer called for file: {}, schema_address: {}", filename, schema_address);
+        // log_info!("[RUST] create_writer called for file: {}, schema_address: {}", filename, schema_address);
 
         if (schema_address as *mut u8).is_null() {
             log_error!("[RUST] ERROR: Invalid schema address (null pointer) for file: {}, schema_address: {}", filename, schema_address);
@@ -52,7 +52,7 @@ impl NativeParquetWriter {
         let arrow_schema = unsafe { FFI_ArrowSchema::from_raw(schema_address as *mut _) };
         let schema = Arc::new(arrow::datatypes::Schema::try_from(&arrow_schema)?);
 
-        log_info!("[RUST] Schema created with {} fields", schema.fields().len());
+        // log_info!("[RUST] Schema created with {} fields", schema.fields().len());
 
         for (i, field) in schema.fields().iter().enumerate() {
             log_debug!("[RUST] Field {}: {} ({})", i, field.name(), field.data_type());
@@ -70,7 +70,7 @@ impl NativeParquetWriter {
     }
 
     fn write_data(filename: String, array_address: i64, schema_address: i64) -> Result<(), Box<dyn std::error::Error>> {
-        log_info!("[RUST] write_data called for file: {}, array_address: {}, schema_address: {}", filename, array_address, schema_address);
+        // log_info!("[RUST] write_data called for file: {}, array_address: {}, schema_address: {}", filename, array_address, schema_address);
 
         if (array_address as *mut u8).is_null() || (schema_address as *mut u8).is_null() {
             log_error!("[RUST] ERROR: Invalid FFI addresses for file: {}, array_address: {}, schema_address: {}", filename, array_address, schema_address);
@@ -100,13 +100,13 @@ impl NativeParquetWriter {
                             struct_array.columns().to_vec(),
                         )?;
 
-                        log_info!("[RUST] Created RecordBatch with {} rows and {} columns", record_batch.num_rows(), record_batch.num_columns());
+                        // log_debug!("[RUST] Created RecordBatch with {} rows and {} columns", record_batch.num_rows(), record_batch.num_columns());
 
                         if let Some(writer_arc) = WRITER_MANAGER.get(&filename) {
                             log_debug!("[RUST] Writing RecordBatch to file");
                             let mut writer = writer_arc.lock().unwrap();
                             writer.write(&record_batch)?;
-                            log_info!("[RUST] Successfully wrote RecordBatch");
+                            // log_info!("[RUST] Successfully wrote RecordBatch");
                             Ok(())
                         } else {
                             log_error!("[RUST] ERROR: No writer found for file: {}", filename);
@@ -126,7 +126,7 @@ impl NativeParquetWriter {
     }
 
     fn close_writer(filename: String) -> Result<Option<FormatFileMetaData>, Box<dyn std::error::Error>> {
-        log_info!("[RUST] close_writer called for file: {}", filename);
+        // log_info!("[RUST] close_writer called for file: {}", filename);
 
         if let Some((_, writer_arc)) = WRITER_MANAGER.remove(&filename) {
             match Arc::try_unwrap(writer_arc) {
@@ -134,8 +134,8 @@ impl NativeParquetWriter {
                     let writer = mutex.into_inner().unwrap();
                     match writer.close() {
                         Ok(file_metadata) => {
-                            log_info!("[RUST] Successfully closed writer for file: {}, metadata: version={}, num_rows={}\n",
-                                filename, file_metadata.version, file_metadata.num_rows);
+                            // log_info!("[RUST] Successfully closed writer for file: {}, metadata: version={}, num_rows={}\n",
+                            //     filename, file_metadata.version, file_metadata.num_rows);
                             Ok(Some(file_metadata))
                         }
                         Err(e) => {
@@ -156,12 +156,12 @@ impl NativeParquetWriter {
     }
 
     fn flush_to_disk(filename: String) -> Result<(), Box<dyn std::error::Error>> {
-        log_info!("[RUST] fsync_file called for file: {}", filename);
+        // log_info!("[RUST] fsync_file called for file: {}", filename);
 
         if let Some(file) = FILE_MANAGER.get_mut(&filename) {
             match file.sync_all() {
                 Ok(_) => {
-                    log_info!("[RUST] Successfully fsynced file: {}", filename);
+                    // log_info!("[RUST] Successfully fsynced file: {}", filename);
                     drop(file);
                     FILE_MANAGER.remove(&filename);
                     Ok(())

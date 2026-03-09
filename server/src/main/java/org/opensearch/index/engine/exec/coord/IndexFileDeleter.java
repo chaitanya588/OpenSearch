@@ -71,7 +71,6 @@ public class IndexFileDeleter {
         }
 
         if (!dfFilesToDelete.isEmpty()) {
-            System.out.println("Files to delete : " + dfFilesToDelete);
             deleteUnreferencedFiles(dfFilesToDelete);
         }
     }

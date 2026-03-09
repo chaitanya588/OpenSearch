@@ -102,7 +102,6 @@ public class CatalogSnapshotManager {
     }
 
     public synchronized void applyMergeResults(MergeResult mergeResult, OneMerge oneMerge) {
-
         List<Segment> segmentList = new ArrayList<>(latestCatalogSnapshot.getSegments());
 
         Segment segmentToAdd = getSegment(mergeResult.getMergedWriterFileSet());
@@ -166,7 +165,14 @@ public class CatalogSnapshotManager {
     }
 
     private Segment getSegment(Map<DataFormat, WriterFileSet> writerFileSetMap) {
-        Segment segment = new Segment(0);
+        // Use the writer generation from one of the WriterFileSets (they should all have the same generation for a merged segment)
+        // If no WriterFileSet is available, default to 0
+        long generation = writerFileSetMap.values().stream()
+            .findFirst()
+            .map(WriterFileSet::getWriterGeneration)
+            .orElse(0L);
+
+        Segment segment = new Segment(generation);
 
         for (DataFormat dataFormat : writerFileSetMap.keySet()) {
             segment.addSearchableFiles(dataFormat.name(), writerFileSetMap.get(dataFormat));

@@ -89,7 +89,7 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
             Collection<String> parquetFilesToDelete = filesToDelete.get(PARQUET_DATA_FORMAT.name());
             for (String fileName : parquetFilesToDelete) {
                 Path filePath = Paths.get(fileName);
-                logger.info("Deleting file [ParquetExecutionEngine]: {}", filePath);
+//                logger.info("Deleting file [ParquetExecutionEngine]: {}", filePath);
                 try {
                     Files.delete(filePath);
                 } catch (Exception e) {

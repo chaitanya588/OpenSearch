@@ -118,7 +118,7 @@ pub fn process_parquet_files(input_files: &[String], output_path: &str) -> Resul
 
     // Read schema from first file
     let schema = read_schema_from_file(&input_files[0])?;
-    log_info!("Schema read successfully: {:?}", schema);
+    // log_info!("Schema read successfully: {:?}", schema);
 
     // Create writer
     let mut writer = create_writer(output_path, schema.clone())?;
@@ -130,10 +130,10 @@ pub fn process_parquet_files(input_files: &[String], output_path: &str) -> Resul
     writer.close()
         .map_err(|e| ParquetMergeError::WriterCreationError(format!("Failed to close writer: {}", e)))?;
 
-    log_info!(
-        "Processing complete: {} files, {} rows, {} batches, {} mappings",
-        stats.files_processed, stats.total_rows, stats.total_batches, mappings.len()
-    );
+    // log_info!(
+    //     "Processing complete: {} files, {} rows, {} batches, {} mappings",
+    //     stats.files_processed, stats.total_rows, stats.total_batches, mappings.len()
+    // );
 
     let output_file_id = std::path::Path::new(output_path)
         .file_name()
@@ -202,7 +202,7 @@ fn process_files(
     let mut mappings = Vec::new();
 
     for path in input_files {
-        log_info!("Processing file: {}", path);
+        // log_info!("Processing file: {}", path);
 
         let old_file_id = std::path::Path::new(path)
             .file_name()
@@ -257,7 +257,7 @@ fn process_files(
         stats.total_rows += file_rows;
         stats.total_batches += file_batches;
 
-        log_info!("File processed: {} rows, {} batches", file_rows, file_batches);
+        // log_info!("File processed: {} rows, {} batches", file_rows, file_batches);
     }
 
     Ok((stats, mappings))

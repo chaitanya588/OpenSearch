@@ -15,10 +15,16 @@ import java.util.concurrent.Executor;
 public class CustomOneMerge extends MergePolicy.OneMerge {
 
     private final RowIdMapping rowIdMapping;
+    private final long writerGeneration;
 
-    public CustomOneMerge(List<SegmentCommitInfo> segments, RowIdMapping rowIdMapping) {
+    public CustomOneMerge(
+        List<SegmentCommitInfo> segments,
+        RowIdMapping rowIdMapping,
+        long writerGeneration
+    ) {
         super(segments);
         this.rowIdMapping = rowIdMapping;
+        this.writerGeneration = writerGeneration;
     }
 
     @Override
@@ -76,5 +82,13 @@ public class CustomOneMerge extends MergePolicy.OneMerge {
                 return totalDocs;
             }
         };
+    }
+
+    @Override
+    public void setMergeInfo(SegmentCommitInfo info) {
+        super.setMergeInfo(info);
+        if (info != null) {
+            info.info.putAttribute("writer_generation", String.valueOf(writerGeneration));
+        }
     }
 }

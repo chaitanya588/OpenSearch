@@ -106,7 +106,7 @@ public class VSRManager implements AutoCloseable {
 
     public ParquetFileMetadata flush(FlushIn flushIn) throws IOException {
         ManagedVSR currentVSR = managedVSR.get();
-        logger.info("Flush called for {}, row count: {}", fileName, currentVSR.getRowCount());
+//        logger.info("Flush called for {}, row count: {}", fileName, currentVSR.getRowCount());
         try {
             // Only flush if we have data
             if (currentVSR.getRowCount() == 0) {
@@ -116,7 +116,7 @@ public class VSRManager implements AutoCloseable {
 
             // Transition VSR to FROZEN state before flushing
             currentVSR.moveToFrozen();
-            logger.info("Flushing {} rows for {}", currentVSR.getRowCount(), fileName);
+//            logger.info("Flushing {} rows for {}", currentVSR.getRowCount(), fileName);
             ParquetFileMetadata metadata;
 
             // Write through native writer handle

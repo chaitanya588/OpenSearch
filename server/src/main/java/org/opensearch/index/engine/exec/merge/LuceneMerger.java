@@ -88,7 +88,7 @@ public class LuceneMerger implements Merger {
             }
 
             if (!segmentsToMerge.isEmpty()) {
-                MergePolicy.OneMerge oneMerge = new CustomOneMerge(segmentsToMerge, rowIdMapping);
+                MergePolicy.OneMerge oneMerge = new CustomOneMerge(segmentsToMerge, rowIdMapping, writerGeneration);
                 indexWriter.executeMerge(oneMerge);
 
                 // Collect files from newly produced segment(s) using reflection
@@ -114,6 +114,8 @@ public class LuceneMerger implements Merger {
 
                 return new MergeResult(rowIdMapping, mergedWriterFileSet);
             }
+
+            logger.info("Merged writer file set 2");
 
             // No segments to merge — return empty result
             return new MergeResult(rowIdMapping, Map.of());

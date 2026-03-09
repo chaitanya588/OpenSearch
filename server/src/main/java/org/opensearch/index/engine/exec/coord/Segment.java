@@ -79,4 +79,10 @@ public class Segment implements Serializable, Writeable {
             entry.getValue().writeTo(out);
         }
     }
+
+    @Override
+    public String toString() {
+        return "Segment{writergeneration=" + generation +
+            ", dfGroupedSearchableFiles=" + dfGroupedSearchableFiles + '}';
+    }
 }
