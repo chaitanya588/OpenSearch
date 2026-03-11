@@ -12,6 +12,7 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.index.engine.exec.coord.Segment;
 
 import org.apache.logging.log4j.Logger;
@@ -249,6 +250,8 @@ public abstract class MergeHandler {
             List<WriterFileSet> filesToMerge =
                 getFilesToMerge(oneMerge, compositeDataFormat.getPrimaryDataFormat());
 
+            long timeNS = System.nanoTime();
+
             // Merging primary data format
             MergeResult primaryMergeResult = dataFormatMergerMap
                 .get(compositeDataFormat.getPrimaryDataFormat())
@@ -258,6 +261,10 @@ public abstract class MergeHandler {
                 compositeDataFormat.getPrimaryDataFormat(),
                 primaryMergeResult.getMergedWriterFileSetForDataformat(compositeDataFormat.getPrimaryDataFormat())
             );
+
+            long timeNS1 = System.nanoTime();
+            long tookMS = TimeValue.nsecToMSec(timeNS1 - timeNS);
+            logger.info("Parquet Merge time - {}", tookMS);
 
             // Merging other format as per the old segment + row id -> new row id mapping.
             compositeIndexingExecutionEngine.getDelegates().stream()
@@ -272,6 +279,9 @@ public abstract class MergeHandler {
                     mergedWriterFileSet.put(df,
                         secondaryMerge.getMergedWriterFileSetForDataformat(df));
                 });
+
+            long tookMS1 = TimeValue.nsecToMSec(System.nanoTime() - timeNS1);
+            logger.info("Lucene Merge time - {}", tookMS1);
 
             MergeResult mergeResult = new MergeResult(primaryMergeResult.getRowIdMapping(), mergedWriterFileSet);
             mergeSuccessful = true;

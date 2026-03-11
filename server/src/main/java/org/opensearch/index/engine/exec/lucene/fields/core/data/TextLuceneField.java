@@ -18,13 +18,23 @@ import org.opensearch.index.mapper.TextFieldMapper;
 
 public class TextLuceneField extends LuceneField {
 
+    private static final FieldType[] FIELD_TYPE_CACHE = new FieldType[2];
+
+    static {
+        for (int i = 0; i < 2; i++) {
+            FieldType ft = new FieldType();
+            ft.setStored((i & 1) != 0);
+            ft.setIndexOptions(IndexOptions.DOCS);
+            ft.freeze();
+            FIELD_TYPE_CACHE[i] = ft;
+        }
+    }
+
     @Override
     public void createField(MappedFieldType mappedFieldType, ParseContext.Document document, Object parseValue) {
         final TextFieldMapper.TextFieldType textFieldType = (TextFieldMapper.TextFieldType) mappedFieldType;
         final String value = (String) parseValue;
-        FieldType fieldType = new FieldType();
-        fieldType.setStored(textFieldType.isStored());
-        fieldType.setIndexOptions(IndexOptions.DOCS);
+        FieldType fieldType = FIELD_TYPE_CACHE[textFieldType.isStored() ? 1 : 0];
         Field field = new Field(textFieldType.name(), value, fieldType);
         document.add(field);
     }

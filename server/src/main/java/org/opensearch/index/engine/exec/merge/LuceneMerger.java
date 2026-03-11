@@ -64,7 +64,7 @@ public class LuceneMerger implements Merger {
         try {
             if (rowIdMapping != null) {
                 logger.info("LuceneMerger starting merge with RowIdMapping: fileId={}, mappingSize={}",
-                    rowIdMapping.getFileId(), rowIdMapping.getMapping().size());
+                    rowIdMapping.getFileId(), rowIdMapping.size());
             }
 
             // Collect the writer generations of the segments we want to merge.
@@ -169,11 +169,12 @@ public class LuceneMerger implements Merger {
                 }
 
                 int matched = 0, mismatched = 0, skipped = 0;
-                for (Map.Entry<RowId, Long> entry : rowIdMapping.getMapping().entrySet()) {
-                    RowId oldRowId = entry.getKey();
-                    int newDocPos = entry.getValue().intValue();
+                for (int i = 0; i < rowIdMapping.size(); i++) {
+                    long oldRowId = rowIdMapping.getOldRowId(i);
+                    String oldFileId = rowIdMapping.getFileIdAt(i);
+                    int newDocPos = (int) rowIdMapping.getNewRowIdAt(i);
 
-                    if (fileIdToBaseDoc.get(oldRowId.getFileId()) == null) {
+                    if (fileIdToBaseDoc.get(oldFileId) == null) {
                         skipped++;
                         continue;
                     }
@@ -182,7 +183,7 @@ public class LuceneMerger implements Merger {
                         continue;
                     }
 
-                    if (mergedRowIds[newDocPos] == oldRowId.getRowId()) {
+                    if (mergedRowIds[newDocPos] == oldRowId) {
                         matched++;
                     } else {
                         mismatched++;

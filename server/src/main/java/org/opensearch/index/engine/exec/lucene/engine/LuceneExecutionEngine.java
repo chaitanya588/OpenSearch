@@ -98,7 +98,9 @@ public class LuceneExecutionEngine implements IndexingExecutionEngine<DataFormat
             iwc.setIndexDeletionPolicy(combinedDeletionPolicy);
             iwc.setMergePolicy(NoMergePolicy.INSTANCE);
             iwc.setMergeScheduler(new SerialMergeScheduler());
-            iwc.setIndexSort(new Sort(new SortField(ROW_ID, SortField.Type.LONG)));
+            // Force compound file format for merged segments (fewer files, simpler management)
+            iwc.setUseCompoundFile(true);
+//            iwc.setIndexSort(new Sort(new SortField(ROW_ID, SortField.Type.LONG)));
             // DEBUG: log every incRef/decRef to trace unreferenced file issues
             enableVerboseRefCounts();
             iwc.setInfoStream(new PrintStreamInfoStream(System.out));

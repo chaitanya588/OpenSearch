@@ -328,48 +328,50 @@ fn extract_writer_generation(path: &str) -> Option<String> {
     filename.rsplit('_').next().map(|s| s.to_string())
 }
 
-// Create Java RowIdMapping object
+// Create Java RowIdMapping object using compact array representation
 fn create_row_id_mapping_object<'local>(
     env: &mut JNIEnv<'local>,
     mappings: Vec<RowIdMappingData>,
     output_file_id: &str,
 ) -> Result<JObject<'local>, Box<dyn Error>> {
-    // Create HashMap<RowId, Long>
-    let hash_map = env.new_object("java/util/HashMap", "()V", &[])?;
-
-    for mapping in mappings {
-        // Create RowId object
-        let row_id_obj = env.new_object(
-            "org/opensearch/index/engine/exec/merge/RowId",
-            "(JLjava/lang/String;)V",
-            &[
-                JValue::Long(mapping.old_row_id),
-                JValue::Object(&env.new_string(&mapping.old_file_id)?.into()),
-            ],
-        )?;
-
-        // Create Long object for new row ID
-        let new_row_id_obj = env.new_object(
-            "java/lang/Long",
-            "(J)V",
-            &[JValue::Long(mapping.new_row_id)],
-        )?;
-
-        // Put into HashMap
-        env.call_method(
-            &hash_map,
-            "put",
-            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
-            &[JValue::Object(&row_id_obj), JValue::Object(&new_row_id_obj)],
-        )?;
+    let size = mappings.len();
+    
+    // Create primitive long arrays for old and new row IDs
+    let old_row_ids = env.new_long_array(size as i32)?;
+    let new_row_ids = env.new_long_array(size as i32)?;
+    
+    // Create String array for file IDs
+    let file_ids = env.new_object_array(
+        size as i32,
+        "java/lang/String",
+        JObject::null(),
+    )?;
+    
+    // Populate arrays
+    let mut old_ids_vec = Vec::with_capacity(size);
+    let mut new_ids_vec = Vec::with_capacity(size);
+    
+    for (i, mapping) in mappings.into_iter().enumerate() {
+        old_ids_vec.push(mapping.old_row_id);
+        new_ids_vec.push(mapping.new_row_id);
+        
+        let file_id_str = env.new_string(&mapping.old_file_id)?;
+        env.set_object_array_element(&file_ids, i as i32, file_id_str)?;
     }
-
-    // Create RowIdMapping object
+    
+    // Set array contents
+    env.set_long_array_region(&old_row_ids, 0, &old_ids_vec)?;
+    env.set_long_array_region(&new_row_ids, 0, &new_ids_vec)?;
+    
+    // Create RowIdMapping object using array-based constructor
+    // Constructor signature: ([J[J[Ljava/lang/String;Ljava/lang/String;)V
     let row_id_mapping = env.new_object(
         "org/opensearch/index/engine/exec/merge/RowIdMapping",
-        "(Ljava/util/Map;Ljava/lang/String;)V",
+        "([J[J[Ljava/lang/String;Ljava/lang/String;)V",
         &[
-            JValue::Object(&hash_map),
+            JValue::Object(&old_row_ids.into()),
+            JValue::Object(&new_row_ids.into()),
+            JValue::Object(&file_ids.into()),
             JValue::Object(&env.new_string(output_file_id)?.into()),
         ],
     )?;

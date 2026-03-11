@@ -11,7 +11,6 @@ package org.opensearch.index.engine.exec.merge;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.MergePolicy;
-import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.store.Directory;
 
 import java.io.IOException;

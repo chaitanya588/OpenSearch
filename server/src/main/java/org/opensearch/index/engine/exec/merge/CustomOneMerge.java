@@ -48,15 +48,16 @@ public class CustomOneMerge extends MergePolicy.OneMerge {
             baseDoc += segmentInfo.info.maxDoc();
         }
 
-        // Build mapping from RowIdMapping
-        for (Map.Entry<RowId, Long> entry : rowIdMapping.getMapping().entrySet()) {
-            RowId oldRowId = entry.getKey();
-            long newRowId = entry.getValue();
+        // Build mapping using efficient array-based iteration
+        // Avoid getMapping() which creates HashMap objects
+        for (int i = 0; i < rowIdMapping.size(); i++) {
+            long oldRowId = rowIdMapping.getOldRowId(i);
+            long newRowId = rowIdMapping.getNewRowIdAt(i);
+            String oldFileId = rowIdMapping.getFileIdAt(i);
 
-            String oldFileId = oldRowId.getFileId();
             Integer segmentBase = fileIdToBaseDoc.get(oldFileId);
             if (segmentBase != null) {
-                int oldDocId = segmentBase + (int) oldRowId.getRowId();
+                int oldDocId = segmentBase + (int) oldRowId;
                 int newDocId = (int) newRowId;
 
                 if (oldDocId < totalDocs && newDocId < totalDocs) {

@@ -18,7 +18,12 @@ import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.ParseContext;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 public class KeywordLuceneField extends LuceneField {
+
+    private static final Map<Long, FieldType> FIELD_TYPE_CACHE = new ConcurrentHashMap<>();
 
     @Override
     public void createField(MappedFieldType mappedFieldType, ParseContext.Document document, Object parseValue) {
@@ -45,12 +50,15 @@ public class KeywordLuceneField extends LuceneField {
     }
 
     private FieldType getFieldType(KeywordFieldMapper.KeywordFieldType keywordFieldType) {
-        FieldType fieldType = new FieldType();
-        fieldType.setTokenized(false);
-        fieldType.setStored(keywordFieldType.isStored());
-        fieldType.setOmitNorms(true);
-        fieldType.setIndexOptions(keywordFieldType.isSearchable() ? IndexOptions.DOCS : IndexOptions.NONE);
-        fieldType.freeze();
-        return fieldType;
+        long key = (keywordFieldType.isStored() ? 1L : 0L) | (keywordFieldType.isSearchable() ? 2L : 0L);
+        return FIELD_TYPE_CACHE.computeIfAbsent(key, k -> {
+            FieldType ft = new FieldType();
+            ft.setTokenized(false);
+            ft.setStored(keywordFieldType.isStored());
+            ft.setOmitNorms(true);
+            ft.setIndexOptions(keywordFieldType.isSearchable() ? IndexOptions.DOCS : IndexOptions.NONE);
+            ft.freeze();
+            return ft;
+        });
     }
 }
