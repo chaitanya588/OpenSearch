@@ -121,11 +121,11 @@ public class LuceneExecutionEngine implements IndexingExecutionEngine<DataFormat
         return new LuceneWriter(directoryPath, createWriter(directoryPath, writerGeneration), writerGeneration);
     }
 
-    private IndexWriter createWriter(Path directoryPath, long writerGeneration) throws IOException {
+    private CustomIndexWriter createWriter(Path directoryPath, long writerGeneration) throws IOException {
         try {
             IndexWriterConfig iwc = getIndexWriterConfig(writerGeneration);
             Directory directory = NIOFSDirectory.open(directoryPath);
-            return new IndexWriter(directory, iwc);
+            return new CustomIndexWriter(directory, iwc);
         } catch (LockObtainFailedException ex) {
             logger.warn("could not lock IndexWriter", ex);
             throw ex;
@@ -147,6 +147,7 @@ public class LuceneExecutionEngine implements IndexingExecutionEngine<DataFormat
     private IndexWriterConfig getIndexWriterConfig(long writerGeneration) {
         final IndexWriterConfig iwc = new IndexWriterConfig();
         iwc.setOpenMode(IndexWriterConfig.OpenMode.CREATE);
+        iwc.setMergeScheduler(new SerialMergeScheduler());
         iwc.setIndexSort(new Sort(new SortField(ROW_ID, SortField.Type.LONG)));
         iwc.setCodec(new LuceneWriterCodec(engineConfig.getCodec().getName(), engineConfig.getCodec(), writerGeneration));
         return iwc;

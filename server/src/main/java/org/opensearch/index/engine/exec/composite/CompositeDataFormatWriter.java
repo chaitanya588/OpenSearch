@@ -156,6 +156,14 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
         return writerGeneration;
     }
 
+    /**
+     * Returns the underlying per-format writers. Used by CompositeIndexingExecutionEngine
+     * to access the child LuceneWriter for post-flush sort merge.
+     */
+    public List<Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>>> getWriters() {
+        return writers;
+    }
+
     public static class CompositeDocumentInput implements DocumentInput<List<? extends DocumentInput<?>>> {
 
         List<? extends DocumentInput<?>> inputs;

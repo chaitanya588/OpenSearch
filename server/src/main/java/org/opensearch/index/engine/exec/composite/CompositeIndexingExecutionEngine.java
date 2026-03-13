@@ -11,6 +11,7 @@ package org.opensearch.index.engine.exec.composite;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.DocumentInput;
 import org.opensearch.index.engine.exec.FileInfos;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
 import org.opensearch.index.engine.exec.MergeInput;
@@ -18,16 +19,23 @@ import org.opensearch.index.engine.exec.Merger;
 import org.opensearch.index.engine.exec.RefreshInput;
 import org.opensearch.index.engine.exec.RefreshResult;
 import org.opensearch.index.engine.exec.Writer;
+import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.coord.Any;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.coord.CompositeDataFormatWriterPool;
 import org.opensearch.index.engine.exec.coord.Segment;
+import org.opensearch.index.engine.exec.lucene.writer.LuceneWriter;
+import org.opensearch.index.engine.exec.merge.LuceneMerger;
+import org.opensearch.index.engine.exec.merge.MergeResult;
+import org.opensearch.index.engine.exec.merge.RowIdMapping;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.plugins.DataSourcePlugin;
 import org.opensearch.plugins.PluginsService;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -43,7 +51,12 @@ import org.apache.lucene.search.SortField;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine<Any> {
+
+    private static final Logger logger = LogManager.getLogger(CompositeIndexingExecutionEngine.class);
 
     private final CompositeDataFormatWriterPool dataFormatWriterPool;
     private final Any dataFormat;
@@ -156,13 +169,19 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
             List<CompositeDataFormatWriter> dataFormatWriters = dataFormatWriterPool.checkoutAll();
             List<Segment> refreshedSegment = ignore.getExistingSegments();
             List<Segment> newSegmentList = new ArrayList<>();
-            // flush to disk
+            // flush to disk, then sort-merge before closing writers
             for (CompositeDataFormatWriter dataFormatWriter : dataFormatWriters) {
                 Segment newSegment = new Segment(dataFormatWriter.getWriterGeneration());
                 FileInfos fileInfos = dataFormatWriter.flush(null);
                 fileInfos.getWriterFilesMap().forEach((key, value) -> {
                     newSegment.addSearchableFiles(key.name(), value);
                 });
+
+                // Post-flush sort merge: sort Parquet, then reorder Lucene using RowIdMapping
+                // The child writers are still alive at this point, so LuceneMerger can operate
+                // on the child CustomIndexWriter directly.
+                applySortMergeOnChildWriter(dataFormatWriter, newSegment);
+
                 dataFormatWriter.close();
                 if (!newSegment.getDFGroupedSearchableFiles().isEmpty()) {
                     newSegmentList.add(newSegment);
