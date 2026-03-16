@@ -20,6 +20,7 @@ import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.common.logging.Loggers;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.MergeInput;
 import org.opensearch.index.engine.exec.Merger;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.composite.CompositeIndexingExecutionEngine;
@@ -55,6 +56,8 @@ public abstract class MergeHandler {
     private final Set<Segment> currentlyMergingSegments = new HashSet<>();
     private final Logger logger;
     private final ShardId shardId;
+    private final String sortColumn;
+    private final boolean reverseSort;
 
 //        public static void main(String[] args) throws Exception {
 //            String indexPath = "/Volumes/workplace/OpenSource/MustangOpenSearchDevelopment/OpenSearch/build/" +
@@ -155,13 +158,17 @@ public abstract class MergeHandler {
         CompositeEngine compositeEngine,
         CompositeIndexingExecutionEngine compositeIndexingExecutionEngine,
         Any dataFormats,
-        ShardId shardId
+        ShardId shardId,
+        String sortColumn,
+        boolean reverseSort
     ) {
         this.shardId = shardId;
         this.logger = Loggers.getLogger(getClass(), shardId);
         this.compositeDataFormat = dataFormats;
         this.compositeIndexingExecutionEngine = compositeIndexingExecutionEngine;
         this.compositeEngine = compositeEngine;
+        this.sortColumn = sortColumn;
+        this.reverseSort = reverseSort;
         dataFormatMergerMap = new HashMap<>();
 
         compositeIndexingExecutionEngine.getDelegates().forEach(engine -> {
@@ -253,9 +260,10 @@ public abstract class MergeHandler {
             long timeNS = System.nanoTime();
 
             // Merging primary data format
+            MergeInput primaryMergeInput = new MergeInput(filesToMerge, mergedWriterGeneration, sortColumn, reverseSort);
             MergeResult primaryMergeResult = dataFormatMergerMap
                 .get(compositeDataFormat.getPrimaryDataFormat())
-                .merge(filesToMerge, mergedWriterGeneration);
+                .merge(primaryMergeInput);
 
             mergedWriterFileSet.put(
                 compositeDataFormat.getPrimaryDataFormat(),
@@ -273,8 +281,9 @@ public abstract class MergeHandler {
                     DataFormat df = indexingExecutionEngine.getDataFormat();
                     List<WriterFileSet> files = getFilesToMerge(oneMerge, df);
 
+                    MergeInput secondaryMergeInput = new MergeInput(files, mergedWriterGeneration, sortColumn, reverseSort);
                     MergeResult secondaryMerge = dataFormatMergerMap.get(df)
-                        .merge(files, primaryMergeResult.getRowIdMapping(), mergedWriterGeneration);
+                        .merge(secondaryMergeInput, primaryMergeResult.getRowIdMapping());
 
                     mergedWriterFileSet.put(df,
                         secondaryMerge.getMergedWriterFileSetForDataformat(df));

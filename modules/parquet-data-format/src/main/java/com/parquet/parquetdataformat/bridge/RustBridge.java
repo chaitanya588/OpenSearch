@@ -31,7 +31,7 @@ public class RustBridge {
     public static native void initLogger();
 
     // Enhanced native methods that handle validation and provide better error reporting
-    public static native void createWriter(String file, long schemaAddress) throws IOException;
+    public static native void createWriter(String file, long schemaAddress, String sortColumn, boolean reverseSort) throws IOException;
     public static native void write(String file, long arrayAddress, long schemaAddress) throws IOException;
     public static native ParquetFileMetadata closeWriter(String file) throws IOException;
     public static native void flushToDisk(String file) throws IOException;
@@ -41,5 +41,18 @@ public class RustBridge {
 
 
     // Native method declarations - these will be implemented in the JNI library
-    public static native RowIdMapping mergeParquetFilesInRust(List<Path> inputFiles, String outputFile);
+    public static native RowIdMapping mergeParquetFilesInRust(List<Path> inputFiles, String outputFile, String sortKey, boolean isReverse);
+
+    /**
+     * Streaming sorted k-way merge of Parquet files. Returns a RowIdMapping
+     * that maps old (file, rowId) pairs to new sequential row IDs in the
+     * sorted output. Used when a sort column is configured.
+     */
+    public static native RowIdMapping mergeParquetFilesSorted(List<Path> inputFiles, String outputFile, String sortKey, boolean isReverse);
+
+    /**
+     * Sort a single Parquet file in-place by the given sort column.
+     * Used during the sort-on-close path for individual segment files.
+     */
+    public static native void sortParquetFile(String filePath, String sortColumn, boolean isReverse) throws IOException;
 }

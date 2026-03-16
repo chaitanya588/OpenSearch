@@ -14,6 +14,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.index.engine.exec.DataFormat;
+import org.opensearch.index.engine.exec.MergeInput;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.merge.MergeResult;
 import org.opensearch.index.engine.exec.merge.RowIdMapping;
@@ -26,24 +27,27 @@ import java.util.List;
 import java.util.Map;
 
 import static com.parquet.parquetdataformat.bridge.RustBridge.mergeParquetFilesInRust;
+import static com.parquet.parquetdataformat.bridge.RustBridge.mergeParquetFilesSorted;
 
 /**
- * Implements record-batch-based merging of Parquet files.
+ * Implements streaming merge of Parquet files with optional sort support.
  */
-public class RecordBatchMergeStrategy implements ParquetMergeStrategy {
+public class StreamingParquetMergeStrategy implements ParquetMergeStrategy {
 
     private static final Logger logger =
-        LogManager.getLogger(RecordBatchMergeStrategy.class);
+        LogManager.getLogger(StreamingParquetMergeStrategy.class);
 
     @Override
-    public MergeResult mergeParquetFiles(List<WriterFileSet> files, long writerGeneration) {
+    public MergeResult mergeParquetFiles(MergeInput mergeInput) {
+        List<WriterFileSet> files = mergeInput.getFileMetadataList();
+        long writerGeneration = mergeInput.getWriterGeneration();
 
         if (files.isEmpty()) {
             throw new IllegalArgumentException("No files to merge");
         }
 
         List<Path> filePaths = new ArrayList<>();
-        files.forEach(writerFileSet ->  writerFileSet.getFiles().forEach(
+        files.forEach(writerFileSet -> writerFileSet.getFiles().forEach(
             file -> filePaths.add(Path.of(writerFileSet.getDirectory(), file))));
 
         String outputDirectory = files.iterator().next().getDirectory();
@@ -51,11 +55,29 @@ public class RecordBatchMergeStrategy implements ParquetMergeStrategy {
         String mergedFileName = getMergedFileName(writerGeneration);
 
         try {
-            // Merge files in Rust and get row ID mappings
-            RowIdMapping rowIdMapping = mergeParquetFilesInRust(filePaths, mergedFilePath);
+            // Merge files in Rust and get row ID mappings, passing sort params.
+            // Use the streaming sorted merge when a sort key is configured,
+            // otherwise fall back to the original unsorted merge.
+            RowIdMapping rowIdMapping;
+            String sortingField = mergeInput.getSortingField();
+            if (sortingField != null && !sortingField.isEmpty()) {
+                rowIdMapping = mergeParquetFilesSorted(
+                    filePaths,
+                    mergedFilePath,
+                    sortingField,
+                    mergeInput.isReverseSort()
+                );
+            } else {
+                rowIdMapping = mergeParquetFilesInRust(
+                    filePaths,
+                    mergedFilePath,
+                    mergeInput.getSortingField(),
+                    mergeInput.isReverseSort()
+                );
+            }
 
             WriterFileSet mergedWriterFileSet =
-            WriterFileSet.builder().directory(Path.of(outputDirectory)).addFile(mergedFileName).writerGeneration(writerGeneration).build();
+                WriterFileSet.builder().directory(Path.of(outputDirectory)).addFile(mergedFileName).writerGeneration(writerGeneration).build();
 
             Map<DataFormat, WriterFileSet> mergedWriterFileSetMap = Collections.singletonMap(
                 new ParquetDataFormat(),
@@ -83,15 +105,12 @@ public class RecordBatchMergeStrategy implements ParquetMergeStrategy {
                     ),
                     innerException
                 );
-
             }
             throw exception;
         }
-
     }
 
     private String getMergedFileName(long generation) {
-        // TODO: For debugging we have added extra "merged" in file name, later we can remove and keep same as writer
         return ParquetExecutionEngine.FILE_NAME_PREFIX + "_merged_" + generation + ParquetExecutionEngine.FILE_NAME_EXT;
     }
 

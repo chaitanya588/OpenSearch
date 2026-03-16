@@ -53,10 +53,21 @@ struct ProcessingStats {
 }
 
 // Row ID mapping for cross-format merge
-struct RowIdMappingData {
-    old_file_id: String,
-    old_row_id: i64,
-    new_row_id: i64,
+pub struct RowIdMappingData {
+    pub old_file_id: String,
+    pub old_row_id: i64,
+    pub new_row_id: i64,
+}
+
+// Implement Debug for test assertions
+impl std::fmt::Debug for RowIdMappingData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowIdMappingData")
+            .field("old_file_id", &self.old_file_id)
+            .field("old_row_id", &self.old_row_id)
+            .field("new_row_id", &self.new_row_id)
+            .finish()
+    }
 }
 
 // JNI Entry Point - returns RowIdMapping to Java
@@ -66,6 +77,8 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_merg
     _class: JClass<'local>,
     input_files: JObject<'local>,
     output_file: JString<'local>,
+    sort_key: JString<'local>,
+    is_reverse: jni::sys::jboolean,
 ) -> JObject<'local> {
     let result = catch_unwind(|| {
         let input_files_vec = convert_java_list_to_vec(&mut env, input_files)
@@ -76,8 +89,20 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_merg
             .map_err(|e| format!("Failed to get output file string: {}", e))?
             .into();
 
-        log_info!("Starting merge of {} files to {}", input_files_vec.len(), output_path);
+        // Extract sort key (may be null)
+        let _sort_key_str: Option<String> = if sort_key.is_null() {
+            None
+        } else {
+            Some(env.get_string(&sort_key)
+                .map_err(|e| format!("Failed to get sort key string: {}", e))?
+                .into())
+        };
+        let _is_reverse_bool = is_reverse != 0;
 
+        log_info!("Starting merge of {} files to {}, sort_key={:?}, is_reverse={}",
+            input_files_vec.len(), output_path, _sort_key_str, _is_reverse_bool);
+
+        // TODO: Pass sort params to process_parquet_files when sort implementation is ready
         let (mappings, output_file_id) = process_parquet_files(&input_files_vec, &output_path)?;
 
         log_info!("Merge completed successfully");

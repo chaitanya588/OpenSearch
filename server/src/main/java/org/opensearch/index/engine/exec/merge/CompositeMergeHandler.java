@@ -38,7 +38,14 @@ public class CompositeMergeHandler extends MergeHandler {
         IndexSettings indexSettings,
         ShardId shardId
     ) {
-        super(compositeEngine, compositeIndexingExecutionEngine, dataFormats, shardId);
+        super(
+            compositeEngine,
+            compositeIndexingExecutionEngine,
+            dataFormats,
+            shardId,
+            compositeIndexingExecutionEngine.getSortColumn(),
+            compositeIndexingExecutionEngine.isReverseSort()
+        );
         this.logger = Loggers.getLogger(getClass(), shardId);
         this.compositeEngine = compositeEngine;
         this.compositeIndexingExecutionEngine = compositeIndexingExecutionEngine;

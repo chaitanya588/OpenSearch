@@ -37,4 +37,20 @@ public interface IndexingExecutionEngine<T extends DataFormat> extends Closeable
     }
 
     void deleteFiles(Map<String, Collection<String>> filesToDelete) throws IOException;
+
+    /**
+     * Sets the sort column for index sorting support.
+     * @param sortColumn the column name to sort by, or null if no sorting
+     */
+    default void setSortColumn(String sortColumn) {
+        // no-op by default
+    }
+
+    /**
+     * Sets whether sorting should be in reverse order.
+     * @param reverseSort true for descending sort order
+     */
+    default void setReverseSort(boolean reverseSort) {
+        // no-op by default
+    }
 }

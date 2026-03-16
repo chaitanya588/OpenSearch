@@ -45,10 +45,10 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     private final VSRManager vsrManager;
     private final long writerGeneration;
 
-    public ParquetWriter(String file, Schema schema, long writerGeneration, ArrowBufferPool arrowBufferPool) {
+    public ParquetWriter(String file, Schema schema, long writerGeneration, ArrowBufferPool arrowBufferPool, String sortColumn, boolean reverseSort) {
         this.file = file;
         this.schema = schema;
-        this.vsrManager = new VSRManager(file, schema, arrowBufferPool);
+        this.vsrManager = new VSRManager(file, schema, arrowBufferPool, sortColumn, reverseSort);
         this.writerGeneration = writerGeneration;
     }
 

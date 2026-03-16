@@ -71,6 +71,8 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
     private final ShardPath shardPath;
     private final ParquetMerger parquetMerger = new ParquetMergeExecutor(CompactionStrategy.RECORD_BATCH);
     private final ArrowBufferPool arrowBufferPool;
+    private volatile String sortColumn;
+    private volatile boolean reverseSort;
 
     public ParquetExecutionEngine(Settings settings, Supplier<Schema> schema, ShardPath shardPath) {
         this.schema = schema;
@@ -106,9 +108,19 @@ public class ParquetExecutionEngine implements IndexingExecutionEngine<ParquetDa
     }
 
     @Override
+    public void setSortColumn(String sortColumn) {
+        this.sortColumn = sortColumn;
+    }
+
+    @Override
+    public void setReverseSort(boolean reverseSort) {
+        this.reverseSort = reverseSort;
+    }
+
+    @Override
     public Writer<ParquetDocumentInput> createWriter(long writerGeneration) {
         String fileName = Path.of(shardPath.getDataPath().toString(), getDataFormat().name(), FILE_NAME_PREFIX + "_" + writerGeneration + FILE_NAME_EXT).toString();
-        return new ParquetWriter(fileName, schema.get(), writerGeneration, arrowBufferPool);
+        return new ParquetWriter(fileName, schema.get(), writerGeneration, arrowBufferPool, sortColumn, reverseSort);
     }
 
     @Override

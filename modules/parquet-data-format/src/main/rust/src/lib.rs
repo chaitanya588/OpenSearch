@@ -20,9 +20,14 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 
 pub mod logger;
 pub mod parquet_merge;
+pub mod parquet_merge_stream;
 pub mod rate_limited_writer;
+pub mod field_config;
+pub mod native_settings;
+pub mod writer_properties_builder;
 
 pub use parquet_merge::*;
+pub use parquet_merge_stream::*;
 
 // Re-export macros from the shared crate for logging
 pub use vectorized_exec_spi::{log_info, log_error, log_debug};
@@ -30,6 +35,16 @@ pub use vectorized_exec_spi::{log_info, log_error, log_debug};
 lazy_static! {
     static ref WRITER_MANAGER: DashMap<String, Arc<Mutex<ArrowWriter<File>>>> = DashMap::new();
     static ref FILE_MANAGER: DashMap<String, File> = DashMap::new();
+    /// Tracks sort configuration per file. When a writer is created with a sort column,
+    /// the config is stored here and applied when the writer is closed.
+    static ref SORT_CONFIG: DashMap<String, SortConfig> = DashMap::new();
+}
+
+/// Sort configuration for a writer file.
+#[derive(Debug, Clone)]
+struct SortConfig {
+    sort_column: String,
+    reverse_sort: bool,
 }
 
 struct NativeParquetWriter;
@@ -290,9 +305,25 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_crea
     mut env: JNIEnv,
     _class: JClass,
     file: JString,
-    schema_address: jlong
+    schema_address: jlong,
+    sort_column: JString,
+    reverse_sort: jni::sys::jboolean,
 ) -> jint {
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
+
+    // Store sort config if a sort column is provided
+    if !sort_column.is_null() {
+        let sort_col_str: String = env.get_string(&sort_column)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        if !sort_col_str.is_empty() {
+            SORT_CONFIG.insert(filename.clone(), SortConfig {
+                sort_column: sort_col_str,
+                reverse_sort: reverse_sort != 0,
+            });
+        }
+    }
+
     match NativeParquetWriter::create_writer(filename, schema_address as i64) {
         Ok(_) => 0,
         Err(_) => -1,
@@ -321,8 +352,24 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_clos
     file: JString
 ) -> jobject {
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
-    match NativeParquetWriter::close_writer(filename) {
+
+    // Check if this file has sort config — we'll sort after closing the writer
+    let sort_config = SORT_CONFIG.remove(&filename).map(|(_, cfg)| cfg);
+
+    match NativeParquetWriter::close_writer(filename.clone()) {
         Ok(maybe_metadata) => {
+            // Sort the file on close if sort config was set
+            if let Some(cfg) = sort_config {
+                log_info!("[RUST] Sorting file on close: {} by '{}' (reverse={})",
+                    filename, cfg.sort_column, cfg.reverse_sort);
+                if let Err(e) = parquet_merge_stream::sort_parquet_file(
+                    &filename, &cfg.sort_column, cfg.reverse_sort
+                ) {
+                    log_error!("[RUST] Sort-on-close failed for {}: {}", filename, e);
+                    // Non-fatal: file is still valid, just unsorted
+                }
+            }
+
             match maybe_metadata {
                 Some(metadata) => {
                     match NativeParquetWriter::create_java_metadata(&mut env, &metadata) {
@@ -330,22 +377,18 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_clos
                         Err(e) => {
                             let error_msg = format!("[RUST] ERROR: Failed to create Java metadata object: {:?}\n", e);
                             log_error!("{}", error_msg.trim());
-                            // Throw IOException to Java
                             let _ = env.throw_new("java/io/IOException", "Failed to create metadata object");
                             JObject::null().into_raw()
                         }
                     }
                 }
                 None => {
-                    // No writer was found, but this is not necessarily an error
-                    // Return null to indicate no metadata available
                     JObject::null().into_raw()
                 }
             }
         }
         Err(e) => {
             log_error!("[RUST] ERROR: Failed to close writer: {:?}\n", e);
-            // Throw IOException to Java
             let _ = env.throw_new("java/io/IOException", &format!("Failed to close writer: {}", e));
             JObject::null().into_raw()
         }
