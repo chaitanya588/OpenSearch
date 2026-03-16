@@ -27,7 +27,6 @@
 
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString, JValue};
-use jni::sys::jint;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -358,10 +357,29 @@ impl Ord for HeapItem {
 // Row ID mapping data (mirrors parquet_merge.rs)
 // =============================================================================
 
-struct RowIdMappingEntry {
-    old_file_id: String,
-    old_row_id: i64,
-    new_row_id: i64,
+pub struct RowIdMappingEntry {
+    pub old_file_id: String,
+    pub old_row_id: i64,
+    pub new_row_id: i64,
+}
+
+/// Public entry type for sort permutation caching in SORT_PERMUTATION map.
+/// Used by lib.rs to store the permutation produced during sort-on-close.
+#[derive(Debug, Clone)]
+pub struct SortPermutationEntry {
+    pub old_file_id: String,
+    pub old_row_id: i64,
+    pub new_row_id: i64,
+}
+
+impl From<RowIdMappingEntry> for SortPermutationEntry {
+    fn from(e: RowIdMappingEntry) -> Self {
+        SortPermutationEntry {
+            old_file_id: e.old_file_id,
+            old_row_id: e.old_row_id,
+            new_row_id: e.new_row_id,
+        }
+    }
 }
 
 // =============================================================================
@@ -699,11 +717,15 @@ pub fn merge_streaming_sorted(
 
 /// Sort a single Parquet file in-place by the given sort column.
 /// Reads the file, sorts all batches, writes to a temp file, then renames.
+///
+/// Returns the sort permutation as a Vec of RowIdMappingEntry, where each entry
+/// maps (old_row_id → new_row_id) within the same file. This permutation can be
+/// used directly to reorder Lucene segments without a redundant re-merge step.
 pub fn sort_parquet_file(
     file_path: &str,
     sort_column: &str,
     reverse_sort: bool,
-) -> MergeResult<()> {
+) -> MergeResult<Vec<RowIdMappingEntry>> {
     use arrow::compute::SortOptions;
 
     log_info!(
@@ -726,7 +748,7 @@ pub fn sort_parquet_file(
     }
 
     if all_batches.is_empty() {
-        return Ok(()); // nothing to sort
+        return Ok(Vec::new()); // nothing to sort
     }
 
     // Concatenate all batches into one
@@ -745,6 +767,28 @@ pub fn sort_parquet_file(
         nulls_first: true,
     };
     let indices = arrow::compute::sort_to_indices(sort_col, Some(options), None)?;
+
+    // Build the sort permutation: indices[new_pos] = old_pos
+    // So: old_row_id = indices[i], new_row_id = i
+    let file_id = extract_writer_generation(file_path)
+        .unwrap_or_else(|| {
+            std::path::Path::new(file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(file_path)
+                .to_string()
+        });
+
+    let num_rows = indices.len();
+    let mut mappings: Vec<RowIdMappingEntry> = Vec::with_capacity(num_rows);
+    for new_row_id in 0..num_rows {
+        let old_row_id = indices.value(new_row_id) as i64;
+        mappings.push(RowIdMappingEntry {
+            old_file_id: file_id.clone(),
+            old_row_id,
+            new_row_id: new_row_id as i64,
+        });
+    }
 
     // Apply sort indices to all columns
     let sorted_columns: Vec<ArrayRef> = combined.columns().iter()
@@ -769,8 +813,9 @@ pub fn sort_parquet_file(
     // Atomic rename
     std::fs::rename(&temp_path, file_path)?;
 
-    log_info!("[SORT] File sorted successfully: {}", file_path);
-    Ok(())
+    log_info!("[SORT] File sorted successfully: {} ({} rows, {} mappings)",
+        file_path, num_rows, mappings.len());
+    Ok(mappings)
 }
 
 // =============================================================================
@@ -912,14 +957,15 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_merg
 
 /// JNI entry point for sorting a single Parquet file in-place.
 /// Called from `RustBridge.sortParquetFile`.
+/// Returns a RowIdMapping containing the sort permutation (old_row_id → new_row_id).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_sortParquetFile(
-    mut env: JNIEnv,
-    _class: JClass,
-    file_path: JString,
-    sort_column: JString,
+pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_sortParquetFile<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    file_path: JString<'local>,
+    sort_column: JString<'local>,
     is_reverse: jni::sys::jboolean,
-) -> jint {
+) -> JObject<'local> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let path: String = env.get_string(&file_path)
             .map_err(|e| format!("Failed to get file path: {}", e))?
@@ -934,18 +980,32 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_sort
     }));
 
     match result {
-        Ok(Ok(())) => 0,
+        Ok(Ok(mappings)) => {
+            // Extract file_id from the mappings (all entries share the same file_id)
+            let file_id = mappings.first()
+                .map(|m| m.old_file_id.clone())
+                .unwrap_or_default();
+            match create_row_id_mapping_object(&mut env, mappings, &file_id) {
+                Ok(obj) => obj,
+                Err(e) => {
+                    log_error!("[JNI] Failed to create RowIdMapping from sort: {}", e);
+                    let _ = env.throw_new("java/io/IOException",
+                        &format!("Failed to create RowIdMapping: {}", e));
+                    JObject::null()
+                }
+            }
+        }
         Ok(Err(e)) => {
             log_error!("[JNI] sortParquetFile failed: {}", e);
             let _ = env.throw_new("java/io/IOException",
                 &format!("Sort failed: {}", e));
-            -1
+            JObject::null()
         }
         Err(e) => {
             log_error!("[JNI] Rust panic in sortParquetFile: {:?}", e);
             let _ = env.throw_new("java/io/IOException",
                 &format!("Rust panic: {:?}", e));
-            -1
+            JObject::null()
         }
     }
 }

@@ -18,6 +18,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.index.engine.exec.FlushIn;
 import org.opensearch.index.engine.exec.WriteResult;
+import org.opensearch.index.engine.exec.merge.RowIdMapping;
 
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -44,6 +45,7 @@ public class VSRManager implements AutoCloseable {
     private NativeParquetWriter writer;
     private final String sortColumn;
     private final boolean reverseSort;
+    private volatile RowIdMapping sortPermutation;
 
 
     public VSRManager(String fileName, Schema schema, ArrowBufferPool arrowBufferPool, String sortColumn, boolean reverseSort) {
@@ -128,6 +130,8 @@ public class VSRManager implements AutoCloseable {
                 writer.write(export.getArrayAddress(), export.getSchemaAddress());
                 writer.close();
                 metadata = writer.getMetadata();
+                // Capture the sort permutation produced during sort-on-close (if any)
+                sortPermutation = writer.getSortPermutation();
             }
             logger.debug("Successfully flushed data for {} with metadata: {}", fileName, metadata);
 
@@ -272,5 +276,13 @@ public class VSRManager implements AutoCloseable {
      */
     public ManagedVSR getFrozenVSR() {
         return vsrPool.getFrozenVSR();
+    }
+
+    /**
+     * Returns the sort permutation produced during the last flush's sort-on-close,
+     * or null if no sorting was configured or the file was empty.
+     */
+    public RowIdMapping getSortPermutation() {
+        return sortPermutation;
     }
 }

@@ -38,6 +38,10 @@ lazy_static! {
     /// Tracks sort configuration per file. When a writer is created with a sort column,
     /// the config is stored here and applied when the writer is closed.
     static ref SORT_CONFIG: DashMap<String, SortConfig> = DashMap::new();
+    /// Caches the sort permutation (RowIdMapping entries) produced during sort-on-close.
+    /// Key is the file path. Retrieved by Java via getSortPermutation() JNI call,
+    /// which removes the entry from the map.
+    static ref SORT_PERMUTATION: DashMap<String, Vec<parquet_merge_stream::SortPermutationEntry>> = DashMap::new();
 }
 
 /// Sort configuration for a writer file.
@@ -358,15 +362,24 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_clos
 
     match NativeParquetWriter::close_writer(filename.clone()) {
         Ok(maybe_metadata) => {
-            // Sort the file on close if sort config was set
+            // Sort the file on close if sort config was set, and cache the permutation
             if let Some(cfg) = sort_config {
                 log_info!("[RUST] Sorting file on close: {} by '{}' (reverse={})",
                     filename, cfg.sort_column, cfg.reverse_sort);
-                if let Err(e) = parquet_merge_stream::sort_parquet_file(
+                match parquet_merge_stream::sort_parquet_file(
                     &filename, &cfg.sort_column, cfg.reverse_sort
                 ) {
-                    log_error!("[RUST] Sort-on-close failed for {}: {}", filename, e);
-                    // Non-fatal: file is still valid, just unsorted
+                    Ok(mappings) => {
+                        let permutation: Vec<parquet_merge_stream::SortPermutationEntry> =
+                            mappings.into_iter().map(|m| m.into()).collect();
+                        log_info!("[RUST] Sort-on-close produced {} permutation entries for {}",
+                            permutation.len(), filename);
+                        SORT_PERMUTATION.insert(filename.clone(), permutation);
+                    }
+                    Err(e) => {
+                        log_error!("[RUST] Sort-on-close failed for {}: {}", filename, e);
+                        // Non-fatal: file is still valid, just unsorted
+                    }
                 }
             }
 
@@ -392,6 +405,96 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_clos
             let _ = env.throw_new("java/io/IOException", &format!("Failed to close writer: {}", e));
             JObject::null().into_raw()
         }
+    }
+}
+
+/// JNI entry point to retrieve the sort permutation cached during sort-on-close.
+/// Returns a RowIdMapping object if a permutation was cached for this file, or null.
+/// The permutation is removed from the cache after retrieval (single-use).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_getSortPermutation<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    file: JString<'local>,
+) -> jobject {
+    let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
+
+    match SORT_PERMUTATION.remove(&filename) {
+        Some((_, permutation)) => {
+            if permutation.is_empty() {
+                return JObject::null().into_raw();
+            }
+            // Extract file_id from first entry (all entries share the same file_id for single-file sort)
+            let file_id = permutation[0].old_file_id.clone();
+            let size = permutation.len();
+
+            // Build parallel arrays for RowIdMapping constructor
+            let old_row_ids = match env.new_long_array(size as i32) {
+                Ok(arr) => arr,
+                Err(e) => {
+                    log_error!("[RUST] Failed to create old_row_ids array: {}", e);
+                    return JObject::null().into_raw();
+                }
+            };
+            let new_row_ids = match env.new_long_array(size as i32) {
+                Ok(arr) => arr,
+                Err(e) => {
+                    log_error!("[RUST] Failed to create new_row_ids array: {}", e);
+                    return JObject::null().into_raw();
+                }
+            };
+            let file_ids = match env.new_object_array(size as i32, "java/lang/String", JObject::null()) {
+                Ok(arr) => arr,
+                Err(e) => {
+                    log_error!("[RUST] Failed to create file_ids array: {}", e);
+                    return JObject::null().into_raw();
+                }
+            };
+
+            let mut old_ids_vec = Vec::with_capacity(size);
+            let mut new_ids_vec = Vec::with_capacity(size);
+
+            for (i, entry) in permutation.into_iter().enumerate() {
+                old_ids_vec.push(entry.old_row_id);
+                new_ids_vec.push(entry.new_row_id);
+                match env.new_string(&entry.old_file_id) {
+                    Ok(s) => { let _ = env.set_object_array_element(&file_ids, i as i32, s); }
+                    Err(e) => {
+                        log_error!("[RUST] Failed to create file_id string: {}", e);
+                        return JObject::null().into_raw();
+                    }
+                }
+            }
+
+            let _ = env.set_long_array_region(&old_row_ids, 0, &old_ids_vec);
+            let _ = env.set_long_array_region(&new_row_ids, 0, &new_ids_vec);
+
+            let file_id_jstr = match env.new_string(&file_id) {
+                Ok(s) => s,
+                Err(e) => {
+                    log_error!("[RUST] Failed to create file_id string: {}", e);
+                    return JObject::null().into_raw();
+                }
+            };
+
+            match env.new_object(
+                "org/opensearch/index/engine/exec/merge/RowIdMapping",
+                "([J[J[Ljava/lang/String;Ljava/lang/String;)V",
+                &[
+                    jni::objects::JValue::Object(&old_row_ids.into()),
+                    jni::objects::JValue::Object(&new_row_ids.into()),
+                    jni::objects::JValue::Object(&file_ids.into()),
+                    jni::objects::JValue::Object(&file_id_jstr.into()),
+                ],
+            ) {
+                Ok(obj) => obj.into_raw(),
+                Err(e) => {
+                    log_error!("[RUST] Failed to create RowIdMapping: {}", e);
+                    JObject::null().into_raw()
+                }
+            }
+        }
+        None => JObject::null().into_raw(),
     }
 }
 

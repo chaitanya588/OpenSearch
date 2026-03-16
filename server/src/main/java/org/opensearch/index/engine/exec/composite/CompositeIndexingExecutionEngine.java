@@ -14,7 +14,6 @@ import org.opensearch.index.engine.exec.DataFormat;
 import org.opensearch.index.engine.exec.DocumentInput;
 import org.opensearch.index.engine.exec.FileInfos;
 import org.opensearch.index.engine.exec.IndexingExecutionEngine;
-import org.opensearch.index.engine.exec.MergeInput;
 import org.opensearch.index.engine.exec.Merger;
 import org.opensearch.index.engine.exec.RefreshInput;
 import org.opensearch.index.engine.exec.RefreshResult;
@@ -34,8 +33,6 @@ import org.opensearch.plugins.DataSourcePlugin;
 import org.opensearch.plugins.PluginsService;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -177,10 +174,9 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
                     newSegment.addSearchableFiles(key.name(), value);
                 });
 
-                // Post-flush sort merge: sort Parquet, then reorder Lucene using RowIdMapping
-                // The child writers are still alive at this point, so LuceneMerger can operate
-                // on the child CustomIndexWriter directly.
-                applySortMergeOnChildWriter(dataFormatWriter, newSegment);
+                // Post-flush sort: use the sort permutation from flush (captured during
+                // sort-on-close) to reorder Lucene. No redundant Parquet re-merge needed.
+                applySortMergeOnChildWriter(dataFormatWriter, newSegment, fileInfos.getSortPermutation());
 
                 dataFormatWriter.close();
                 if (!newSegment.getDFGroupedSearchableFiles().isEmpty()) {
@@ -211,60 +207,26 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
     }
 
     /**
-     * Performs a single-segment sort merge on a freshly flushed segment while the child
-     * writers are still alive. Sorts the primary data format (Parquet) to produce a
-     * RowIdMapping, then uses that mapping to reorder the Lucene segment via a temporary
-     * LuceneMerger operating on the child CustomIndexWriter.
+     * Uses the sort permutation captured during Parquet sort-on-close to reorder
+     * the Lucene segment. This eliminates the redundant Parquet re-merge that was
+     * previously needed just to produce a RowIdMapping.
      *
-     * If the sort merge succeeds, the segment's WriterFileSets are updated in-place
-     * with the sorted files. If it fails, the original unsorted segment is left intact.
+     * The Parquet file is already sorted in-place during closeWriter (sort-on-close),
+     * so we only need to apply the permutation to the Lucene segment.
      *
      * @param dataFormatWriter the composite writer whose child writers are still open
-     * @param segment the segment to sort-merge (modified in-place on success)
+     * @param segment the segment to reorder (modified in-place on success)
+     * @param sortPermutation the RowIdMapping from sort-on-close, or null if no sort happened
      */
-    private void applySortMergeOnChildWriter(CompositeDataFormatWriter dataFormatWriter, Segment segment) {
-        DataFormat primaryFormat = dataFormat.getPrimaryDataFormat();
-        WriterFileSet primaryFiles = segment.getDFGroupedSearchableFiles().get(primaryFormat.name());
-        if (primaryFiles == null) {
-            return;
+    private void applySortMergeOnChildWriter(CompositeDataFormatWriter dataFormatWriter, Segment segment, RowIdMapping sortPermutation) {
+        if (sortPermutation == null || sortPermutation.size() == 0) {
+            return; // No sorting configured or empty file — nothing to reorder
         }
 
         try {
-            // Use the original writer generation for the sort merge output.
-            // This is an in-place reorder of the same logical segment, not a new segment,
-            // so it should keep the same generation to avoid mismatches between
-            // Segment.generation and WriterFileSet.writerGeneration.
             long originalGeneration = dataFormatWriter.getWriterGeneration();
 
-            // Step 1: Sort the primary format (Parquet) — this produces the RowIdMapping
-            Merger primaryMerger = delegates.stream()
-                .filter(d -> d.getDataFormat().equals(primaryFormat))
-                .findFirst()
-                .orElseThrow()
-                .getMerger();
-
-            MergeInput mergeInput = new MergeInput(List.of(primaryFiles), originalGeneration, sortColumn, reverseSort);
-            MergeResult primaryMergeResult = primaryMerger.merge(mergeInput);
-            RowIdMapping rowIdMapping = primaryMergeResult.getRowIdMapping();
-            if (rowIdMapping == null || rowIdMapping.size() == 0) {
-                return; // No reordering needed
-            }
-
-            // Update primary format files in the segment with sorted output
-            WriterFileSet sortedPrimaryFiles = primaryMergeResult.getMergedWriterFileSetForDataformat(primaryFormat);
-            if (sortedPrimaryFiles != null) {
-                segment.addSearchableFiles(primaryFormat.name(), sortedPrimaryFiles);
-
-                // Delete the original unsorted parquet files from disk.
-                // These files were written during flush() but were never added to any
-                // CatalogSnapshot (the segment's WriterFileSet was replaced above before
-                // reaching advanceCatalogSnapshot). Since IndexFileDeleter only tracks
-                // files via CatalogSnapshot ref-counting, these orphans would never be
-                // cleaned up otherwise.
-                deleteUnsortedFiles(primaryFiles, sortedPrimaryFiles);
-            }
-
-            // Step 2: Reorder Lucene segment using RowIdMapping on the child writer
+            // Reorder Lucene segment using the sort permutation from Parquet sort-on-close
             LuceneWriter luceneWriter = findLuceneWriter(dataFormatWriter);
             if (luceneWriter == null) {
                 return;
@@ -281,7 +243,7 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
             }
 
             MergeResult luceneMergeResult = childLuceneMerger.merge(
-                List.of(luceneFiles), rowIdMapping, originalGeneration
+                List.of(luceneFiles), sortPermutation, originalGeneration
             );
 
             WriterFileSet sortedLuceneFiles = luceneMergeResult.getMergedWriterFileSetForDataformat(DataFormat.LUCENE);
@@ -295,11 +257,12 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
             // reads segments_N to discover which segments to copy to the parent writer.
             luceneWriter.sync();
 
-            logger.info("Applied post-flush sort merge for segment generation [{}]", originalGeneration);
+            logger.info("Applied post-flush sort reorder for segment generation [{}] using sort-on-close permutation ({} entries)",
+                originalGeneration, sortPermutation.size());
 
         } catch (Exception e) {
             // Non-fatal: the segment is still valid, just unsorted
-            logger.warn("Post-flush sort merge failed for segment generation [{}], continuing with unsorted segment",
+            logger.warn("Post-flush sort reorder failed for segment generation [{}], continuing with unsorted segment",
                 dataFormatWriter.getWriterGeneration(), e);
         }
     }
@@ -314,26 +277,6 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
             }
         }
         return null;
-    }
-
-    /**
-     * Deletes the original unsorted files from disk after sort merge has produced
-     * sorted replacements. Only deletes files that are in the old set but NOT in
-     * the new sorted set (to be safe in case any filenames overlap).
-     */
-    private void deleteUnsortedFiles(WriterFileSet unsortedFiles, WriterFileSet sortedFiles) {
-        Path directory = Path.of(unsortedFiles.getDirectory());
-        for (String file : unsortedFiles.getFiles()) {
-            if (!sortedFiles.getFiles().contains(file)) {
-                try {
-                    Path filePath = directory.resolve(file);
-                    Files.deleteIfExists(filePath);
-                    logger.debug("Deleted unsorted file after sort merge: [{}]", filePath);
-                } catch (IOException e) {
-                    logger.warn("Failed to delete unsorted file [{}]: {}", file, e.getMessage());
-                }
-            }
-        }
     }
 
     @Override

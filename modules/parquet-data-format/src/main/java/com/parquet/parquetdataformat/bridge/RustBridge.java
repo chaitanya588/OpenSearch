@@ -52,7 +52,15 @@ public class RustBridge {
 
     /**
      * Sort a single Parquet file in-place by the given sort column.
+     * Returns a RowIdMapping containing the sort permutation (old_row_id → new_row_id).
      * Used during the sort-on-close path for individual segment files.
      */
-    public static native void sortParquetFile(String filePath, String sortColumn, boolean isReverse) throws IOException;
+    public static native RowIdMapping sortParquetFile(String filePath, String sortColumn, boolean isReverse) throws IOException;
+
+    /**
+     * Retrieves the sort permutation cached during closeWriter's sort-on-close.
+     * Returns a RowIdMapping if a permutation was cached for this file path, or null.
+     * The permutation is removed from the cache after retrieval (single-use).
+     */
+    public static native RowIdMapping getSortPermutation(String filePath);
 }

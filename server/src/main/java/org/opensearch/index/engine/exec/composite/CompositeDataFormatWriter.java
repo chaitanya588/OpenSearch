@@ -72,8 +72,13 @@ public class CompositeDataFormatWriter implements Writer<CompositeDataFormatWrit
     public FileInfos flush(FlushIn flushIn) throws IOException {
         FileInfos.Builder builder = FileInfos.builder();
         for (Map.Entry<DataFormat, Writer<? extends DocumentInput<?>>> writerPair : writers) {
-            Optional<WriterFileSet> writerFileSetOptional = writerPair.getValue().flush(flushIn).getWriterFileSet(writerPair.getKey());
+            FileInfos childFileInfos = writerPair.getValue().flush(flushIn);
+            Optional<WriterFileSet> writerFileSetOptional = childFileInfos.getWriterFileSet(writerPair.getKey());
             writerFileSetOptional.ifPresent(fileMetadata -> builder.putWriterFileSet(writerPair.getKey(), fileMetadata));
+            // Propagate sort permutation from the child that produced it (Parquet)
+            if (childFileInfos.getSortPermutation() != null) {
+                builder.sortPermutation(childFileInfos.getSortPermutation());
+            }
         }
         hasFlushed.set(true);
         return builder.build();

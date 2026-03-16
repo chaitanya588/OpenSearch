@@ -11,6 +11,7 @@ import org.opensearch.index.engine.exec.FlushIn;
 import org.opensearch.index.engine.exec.WriteResult;
 import org.opensearch.index.engine.exec.Writer;
 import org.opensearch.index.engine.exec.WriterFileSet;
+import org.opensearch.index.engine.exec.merge.RowIdMapping;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -71,7 +72,10 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
             .addFile(filePath.getFileName().toString())
             .addNumRows(parquetFileMetadata.numRows())
             .build();
-        return FileInfos.builder().putWriterFileSet(PARQUET_DATA_FORMAT, writerFileSet).build();
+        return FileInfos.builder()
+            .putWriterFileSet(PARQUET_DATA_FORMAT, writerFileSet)
+            .sortPermutation(vsrManager.getSortPermutation())
+            .build();
     }
 
     @Override
@@ -82,6 +86,14 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     @Override
     public void close() {
         vsrManager.close();
+    }
+
+    /**
+     * Returns the sort permutation produced during the last flush's sort-on-close,
+     * or null if no sorting was configured or the file was empty.
+     */
+    public RowIdMapping getSortPermutation() {
+        return vsrManager.getSortPermutation();
     }
 
     @Override

@@ -12,6 +12,8 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.opensearch.index.engine.exec.merge.RowIdMapping;
+
 /**
  * Type-safe handle for native Parquet writer with lifecycle management.
  */
@@ -52,12 +54,16 @@ public class NativeParquetWriter implements Closeable {
     }
 
     private ParquetFileMetadata metadata;
+    private RowIdMapping sortPermutation;
 
     @Override
     public void close() {
         if (writerClosed.compareAndSet(false, true)) {
             try {
                 metadata = RustBridge.closeWriter(filePath);
+                // Retrieve the sort permutation cached during sort-on-close (if any).
+                // This is a single-use retrieval — the native side removes it from cache.
+                sortPermutation = RustBridge.getSortPermutation(filePath);
             } catch (IOException e) {
                 throw new RuntimeException("Failed to close Parquet writer for " + filePath, e);
             }
@@ -66,6 +72,14 @@ public class NativeParquetWriter implements Closeable {
 
     public ParquetFileMetadata getMetadata() {
         return metadata;
+    }
+
+    /**
+     * Returns the sort permutation produced during sort-on-close, or null if
+     * no sorting was configured or the file was empty.
+     */
+    public RowIdMapping getSortPermutation() {
+        return sortPermutation;
     }
 
     public String getFilePath() {
