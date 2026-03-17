@@ -62,7 +62,7 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     public FileInfos flush(FlushIn flushIn) throws IOException {
         ParquetFileMetadata parquetFileMetadata = vsrManager.flush(flushIn);
         // no data flushed
-        if (file == null) {
+        if (parquetFileMetadata == null || file == null) {
             return FileInfos.empty();
         }
         Path filePath = Path.of(file);
