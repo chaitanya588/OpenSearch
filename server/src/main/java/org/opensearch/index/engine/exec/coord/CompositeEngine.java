@@ -778,6 +778,7 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
 
     public synchronized void refresh(String source) throws EngineException {
         final long localCheckpointBeforeRefresh = localCheckpointTracker.getProcessedCheckpoint();
+        final long refreshStartNanos = System.nanoTime();
         boolean refreshed = false;
         try (CompositeEngine.ReleasableRef<CatalogSnapshot> catalogSnapshotReleasableRef = catalogSnapshotManager.acquireSnapshot()) {
             refreshListeners.forEach(PRE_REFRESH_LISTENER_CONSUMER);
@@ -792,11 +793,16 @@ public class CompositeEngine implements LifecycleAware, Closeable, Indexer, Chec
 
             invokeRefreshListeners(refreshed);
 
+            long totalElapsedMs = (System.nanoTime() - refreshStartNanos) / 1_000_000;
+            logger.info("Refresh [source={}] completed: refreshed={}, totalMs={}", source, refreshed, totalElapsedMs);
+
             // Call checkpoint listener's afterRefresh to update refreshed checkpoint
             if (refreshed) {
                 triggerPossibleMerges(); // trigger merges
             }
         } catch (Exception ex) {
+            long totalElapsedMs = (System.nanoTime() - refreshStartNanos) / 1_000_000;
+            logger.error("Refresh [source={}] failed after {}ms", source, totalElapsedMs, ex);
             try {
                 failEngine("refresh failed source[" + source + "]", ex);
             } catch (Exception inner) {

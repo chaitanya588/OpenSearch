@@ -162,46 +162,82 @@ public class CompositeIndexingExecutionEngine implements IndexingExecutionEngine
     @Override
     public RefreshResult refresh(RefreshInput ignore) throws IOException {
         RefreshResult finalResult;
+        final long refreshStartNanos = System.nanoTime();
         try {
             List<CompositeDataFormatWriter> dataFormatWriters = dataFormatWriterPool.checkoutAll();
             List<Segment> refreshedSegment = ignore.getExistingSegments();
             List<Segment> newSegmentList = new ArrayList<>();
+            int totalWritersFlushed = 0;
+            long totalFlushNanos = 0;
+            long totalSortMergeNanos = 0;
+            long totalCloseNanos = 0;
+
             // flush to disk, then sort-merge before closing writers
             for (CompositeDataFormatWriter dataFormatWriter : dataFormatWriters) {
                 Segment newSegment = new Segment(dataFormatWriter.getWriterGeneration());
+
+                long flushStart = System.nanoTime();
                 FileInfos fileInfos = dataFormatWriter.flush(null);
+                long flushElapsed = System.nanoTime() - flushStart;
+                totalFlushNanos += flushElapsed;
+
                 fileInfos.getWriterFilesMap().forEach((key, value) -> {
                     newSegment.addSearchableFiles(key.name(), value);
                 });
 
                 // Post-flush sort: use the sort permutation from flush (captured during
                 // sort-on-close) to reorder Lucene. No redundant Parquet re-merge needed.
+                long sortMergeStart = System.nanoTime();
                 applySortMergeOnChildWriter(dataFormatWriter, newSegment, fileInfos.getSortPermutation());
+                long sortMergeElapsed = System.nanoTime() - sortMergeStart;
+                totalSortMergeNanos += sortMergeElapsed;
 
+                long closeStart = System.nanoTime();
                 dataFormatWriter.close();
+                long closeElapsed = System.nanoTime() - closeStart;
+                totalCloseNanos += closeElapsed;
+
                 if (!newSegment.getDFGroupedSearchableFiles().isEmpty()) {
                     newSegmentList.add(newSegment);
                 }
+                totalWritersFlushed++;
             }
 
             if (newSegmentList.isEmpty()) {
+                long totalElapsedMs = (System.nanoTime() - refreshStartNanos) / 1_000_000;
+                logger.debug("Refresh completed with no new segments (writers checked out: {}, total: {}ms)",
+                    totalWritersFlushed, totalElapsedMs);
                 return null;
             } else {
                 refreshedSegment.addAll(newSegmentList);
             }
 
-            // call refresh for delegats
+            // call refresh for delegates
+            long delegateRefreshStart = System.nanoTime();
             for (IndexingExecutionEngine<?> delegate : delegates) {
                 delegate.refresh(new RefreshInput());
             }
+            long delegateRefreshNanos = System.nanoTime() - delegateRefreshStart;
 
             // make indexing engines aware of everything
             finalResult = new RefreshResult();
             finalResult.setRefreshedSegments(refreshedSegment);
 
+            long totalElapsedMs = (System.nanoTime() - refreshStartNanos) / 1_000_000;
+            logger.info("Refresh completed: writers={}, newSegments={}, flushMs={}, sortMergeMs={}, closeMs={}, delegateRefreshMs={}, totalMs={}",
+                totalWritersFlushed,
+                newSegmentList.size(),
+                totalFlushNanos / 1_000_000,
+                totalSortMergeNanos / 1_000_000,
+                totalCloseNanos / 1_000_000,
+                delegateRefreshNanos / 1_000_000,
+                totalElapsedMs);
+
             // provide a view to the upper layer
             return finalResult;
         } catch (IOException ex) {
+            long totalElapsedMs = (System.nanoTime() - refreshStartNanos) / 1_000_000;
+            logger.error("Refresh failed after {}ms", totalElapsedMs, ex);
             throw new RuntimeException(ex);
         }
     }
