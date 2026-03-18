@@ -1408,8 +1408,10 @@ public class InternalEngine extends Engine {
     final boolean refresh(String source, SearcherScope scope, boolean block) throws EngineException {
         // both refresh types will result in an internal refresh but only the external will also
         // pass the new reader reference to the external reader manager.
+        final long refreshStartNanos = System.nanoTime();
         final long localCheckpointBeforeRefresh = localCheckpointTracker.getProcessedCheckpoint();
         boolean refreshed;
+        long luceneRefreshNanos = 0;
         try {
             // refresh does not need to hold readLock as ReferenceManager can handle correctly if the engine is closed in mid-way.
             if (store.tryIncRef()) {
@@ -1419,12 +1421,14 @@ public class InternalEngine extends Engine {
                     // the second refresh will only do the extra work we have to do for warming caches etc.
                     ReferenceManager<OpenSearchDirectoryReader> referenceManager = getReferenceManager(scope);
                     // it is intentional that we never refresh both internal / external together
+                    long luceneRefreshStart = System.nanoTime();
                     if (block) {
                         referenceManager.maybeRefreshBlocking();
                         refreshed = true;
                     } else {
                         refreshed = referenceManager.maybeRefresh();
                     }
+                    luceneRefreshNanos = System.nanoTime() - luceneRefreshStart;
                 } finally {
                     store.decRef();
                 }
@@ -1435,9 +1439,13 @@ public class InternalEngine extends Engine {
                 refreshed = false;
             }
         } catch (AlreadyClosedException e) {
+            long totalElapsedMs = (System.nanoTime() - refreshStartNanos) / 1_000_000;
+            logger.error("Refresh failed (AlreadyClosedException) after {}ms, source=[{}]", totalElapsedMs, source, e);
             failOnTragicEvent(e);
             throw e;
         } catch (Exception e) {
+            long totalElapsedMs = (System.nanoTime() - refreshStartNanos) / 1_000_000;
+            logger.error("Refresh failed after {}ms, source=[{}]", totalElapsedMs, source, e);
             try {
                 failEngine("refresh failed source[" + source + "]", e);
             } catch (Exception inner) {
@@ -1453,8 +1461,33 @@ public class InternalEngine extends Engine {
         // TODO: maybe we should just put a scheduled job in threadPool?
         // We check for pruning in each delete request, but we also prune here e.g. in case a delete burst comes in and then no more deletes
         // for a long time:
+        long postRefreshStart = System.nanoTime();
         maybePruneDeletes();
         mergeScheduler.refreshConfig();
+        long postRefreshNanos = System.nanoTime() - postRefreshStart;
+
+        long totalElapsedNanos = System.nanoTime() - refreshStartNanos;
+        if (refreshed) {
+            logger.info(
+                "Refresh completed InternalEngine: source=[{}], scope=[{}], block=[{}], refreshed=[true], "
+                    + "luceneRefreshMs={}, postRefreshMs={}, totalMs={}",
+                source,
+                scope,
+                block,
+                luceneRefreshNanos / 1_000_000,
+                postRefreshNanos / 1_000_000,
+                totalElapsedNanos / 1_000_000
+            );
+        } else {
+            logger.debug(
+                "Refresh completed (no-op): source=[{}], scope=[{}], block=[{}], refreshed=[false], totalMs={}",
+                source,
+                scope,
+                block,
+                totalElapsedNanos / 1_000_000
+            );
+        }
+
         return refreshed;
     }
 

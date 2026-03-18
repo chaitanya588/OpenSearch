@@ -152,9 +152,9 @@ public class LuceneExecutionEngine implements IndexingExecutionEngine<DataFormat
         // reordered via the sort permutation after flush. Setting an index sort
         // on the Lucene writer would cause Lucene to attempt its own sort during
         // merge, conflicting with the Parquet-driven sort order.
-        if (!engineConfig.getIndexSettings().isOptimizedIndex()) {
-            iwc.setIndexSort(new Sort(new SortField(ROW_ID, SortField.Type.LONG)));
-        }
+//        if (!engineConfig.getIndexSettings().isOptimizedIndex()) {
+          iwc.setIndexSort(new Sort(new SortField(ROW_ID, SortField.Type.LONG)));
+//        }
         iwc.setCodec(new LuceneWriterCodec(engineConfig.getCodec().getName(), engineConfig.getCodec(), writerGeneration));
         return iwc;
     }
