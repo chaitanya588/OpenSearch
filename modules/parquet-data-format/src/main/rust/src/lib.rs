@@ -42,6 +42,13 @@ lazy_static! {
     /// Key is the file path. Retrieved by Java via getSortPermutation() JNI call,
     /// which removes the entry from the map.
     static ref SORT_PERMUTATION: DashMap<String, Vec<parquet_merge_stream::SortPermutationEntry>> = DashMap::new();
+    /// Buffers RecordBatches in memory for files that have sort configured.
+    /// Instead of encoding/compressing/writing to disk immediately, batches are
+    /// accumulated here and written once (sorted) during close_writer.
+    static ref DEFERRED_BATCHES: DashMap<String, Vec<RecordBatch>> = DashMap::new();
+    /// Stores the Arrow schema for deferred-write files (needed at close time to
+    /// create the ArrowWriter).
+    static ref DEFERRED_SCHEMA: DashMap<String, Arc<arrow::datatypes::Schema>> = DashMap::new();
 }
 
 /// Sort configuration for a writer file.
@@ -63,7 +70,7 @@ impl NativeParquetWriter {
             return Err("Invalid schema address".into());
         }
 
-        if WRITER_MANAGER.contains_key(&filename) {
+        if WRITER_MANAGER.contains_key(&filename) || DEFERRED_BATCHES.contains_key(&filename) {
             log_error!("[RUST] ERROR: Writer already exists for file: {}", filename);
             return Err("Writer already exists for this file".into());
         }
@@ -75,6 +82,16 @@ impl NativeParquetWriter {
 
         for (i, field) in schema.fields().iter().enumerate() {
             log_debug!("[RUST] Field {}: {} ({})", i, field.name(), field.data_type());
+        }
+
+        // When sort is configured, defer writing: buffer batches in memory and
+        // write the final sorted + compressed Parquet file only once at close time.
+        // This avoids the double encode/compress/IO cycle (write unsorted → read back → sort → write sorted).
+        if SORT_CONFIG.contains_key(&filename) {
+            log_debug!("[RUST] Sort configured for {}, using deferred write mode", filename);
+            DEFERRED_BATCHES.insert(filename.clone(), Vec::new());
+            DEFERRED_SCHEMA.insert(filename, schema);
+            return Ok(());
         }
 
         let file = File::create(&filename)?;
@@ -119,8 +136,14 @@ impl NativeParquetWriter {
                             struct_array.columns().to_vec(),
                         )?;
 
-                        // log_debug!("[RUST] Created RecordBatch with {} rows and {} columns", record_batch.num_rows(), record_batch.num_columns());
+                        // Deferred mode: buffer the batch in memory instead of writing to disk.
+                        if let Some(mut batches) = DEFERRED_BATCHES.get_mut(&filename) {
+                            log_debug!("[RUST] Buffering RecordBatch in memory for deferred write (sort mode)");
+                            batches.push(record_batch);
+                            return Ok(());
+                        }
 
+                        // Normal mode: write directly to the ArrowWriter (encode + compress + disk IO).
                         if let Some(writer_arc) = WRITER_MANAGER.get(&filename) {
                             log_debug!("[RUST] Writing RecordBatch to file");
                             let mut writer = writer_arc.lock().unwrap();
@@ -147,6 +170,111 @@ impl NativeParquetWriter {
     fn close_writer(filename: String) -> Result<Option<FormatFileMetaData>, Box<dyn std::error::Error>> {
         // log_info!("[RUST] close_writer called for file: {}", filename);
 
+        // ---- Deferred write path (sort configured) ----
+        // Batches were buffered in memory. Sort them and write the final
+        // compressed Parquet file in a single pass — no double encode/compress.
+        if let Some((_, batches)) = DEFERRED_BATCHES.remove(&filename) {
+            let schema = DEFERRED_SCHEMA.remove(&filename)
+                .map(|(_, s)| s)
+                .ok_or("Deferred schema not found")?;
+
+            if batches.is_empty() {
+                log_debug!("[RUST] No deferred batches for {}, nothing to write", filename);
+                // Clean up sort config since there's nothing to sort
+                SORT_CONFIG.remove(&filename);
+                return Ok(None);
+            }
+
+            let sort_config = SORT_CONFIG.remove(&filename).map(|(_, cfg)| cfg);
+
+            // Concatenate all buffered batches into one
+            let combined = arrow::compute::concat_batches(&schema, batches.iter())?;
+            // Drop the original batches to free memory before sorting
+            drop(batches);
+
+            let num_rows = combined.num_rows();
+            log_info!("[RUST] Deferred close: sorting {} rows for {}", num_rows, filename);
+
+            let (final_batch, mappings) = if let Some(cfg) = sort_config {
+                use arrow::compute::SortOptions;
+                use parquet_merge_stream::SortPermutationEntry;
+
+                let sort_col_idx = schema.fields().iter()
+                    .position(|f| f.name() == &cfg.sort_column)
+                    .ok_or_else(|| format!("Sort column '{}' not found", cfg.sort_column))?;
+
+                let sort_col = combined.column(sort_col_idx);
+                let options = SortOptions {
+                    descending: cfg.reverse_sort,
+                    nulls_first: true,
+                };
+                let indices = arrow::compute::sort_to_indices(sort_col, Some(options), None)?;
+
+                // Build sort permutation
+                let file_id = parquet_merge_stream::extract_writer_generation(&filename)
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(&filename)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&filename)
+                            .to_string()
+                    });
+
+                let mut perms: Vec<SortPermutationEntry> = Vec::with_capacity(num_rows);
+                for new_row_id in 0..num_rows {
+                    let old_row_id = indices.value(new_row_id) as i64;
+                    perms.push(SortPermutationEntry {
+                        old_file_id: file_id.clone(),
+                        old_row_id,
+                        new_row_id: new_row_id as i64,
+                    });
+                }
+
+                // Reorder all columns
+                let sorted_columns: Vec<Arc<dyn arrow::array::Array>> = combined.columns().iter()
+                    .map(|col| arrow::compute::take(col.as_ref(), &indices, None))
+                    .collect::<Result<Vec<_>, _>>()?;
+                drop(combined); // free unsorted data
+
+                let sorted_batch = RecordBatch::try_new(schema.clone(), sorted_columns)?;
+
+                // Rewrite ___row_id column with sequential values
+                let final_batch = parquet_merge_stream::rewrite_row_ids(&sorted_batch, 0)
+                    .map_err(|e| format!("Failed to rewrite row IDs: {}", e))?;
+
+                (final_batch, Some(perms))
+            } else {
+                // No sort config (shouldn't happen in deferred path, but handle gracefully)
+                (combined, None)
+            };
+
+            // Single write: encode + compress + write to disk — happens exactly once
+            let file = File::create(&filename)?;
+            let file_clone = file.try_clone()?;
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+                .build();
+            let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+            writer.write(&final_batch)?;
+            let file_metadata = writer.close()?;
+
+            // fsync the file to ensure durability, then store handle for
+            // any subsequent flush_to_disk call from Java side.
+            file_clone.sync_all()?;
+            FILE_MANAGER.insert(filename.clone(), file_clone);
+
+            log_info!("[RUST] Deferred close complete for {}: {} rows written", filename, file_metadata.num_rows);
+
+            // Cache sort permutation for Java retrieval
+            if let Some(perms) = mappings {
+                log_info!("[RUST] Deferred sort produced {} permutation entries for {}", perms.len(), filename);
+                SORT_PERMUTATION.insert(filename.clone(), perms);
+            }
+
+            return Ok(Some(file_metadata));
+        }
+
+        // ---- Normal write path (no sort) ----
         if let Some((_, writer_arc)) = WRITER_MANAGER.remove(&filename) {
             match Arc::try_unwrap(writer_arc) {
                 Ok(mutex) => {
@@ -176,6 +304,14 @@ impl NativeParquetWriter {
 
     fn flush_to_disk(filename: String) -> Result<(), Box<dyn std::error::Error>> {
         // log_info!("[RUST] fsync_file called for file: {}", filename);
+
+        // In deferred write mode (sort configured), no file exists on disk yet —
+        // batches are buffered in memory. Flush is a no-op; the file will be
+        // written and synced during close_writer.
+        if DEFERRED_BATCHES.contains_key(&filename) {
+            log_debug!("[RUST] flush_to_disk: deferred mode for {}, no-op", filename);
+            return Ok(());
+        }
 
         if let Some(file) = FILE_MANAGER.get_mut(&filename) {
             match file.sync_all() {
@@ -218,7 +354,23 @@ impl NativeParquetWriter {
             }
         }
 
-        log_debug!("[RUST] Total memory usage across {} filtered ArrowWriters (prefix: {}): {} bytes", writer_count, path_prefix, total_memory);
+        // Also account for deferred batches held in memory
+        for entry in DEFERRED_BATCHES.iter() {
+            let filename = entry.key();
+            let batches = entry.value();
+
+            if filename.starts_with(&path_prefix) {
+                let batch_memory: usize = batches.iter()
+                    .map(|b| b.get_array_memory_size())
+                    .sum();
+                total_memory += batch_memory;
+                writer_count += 1;
+
+                log_debug!("[RUST] Filtered Deferred {}: {} bytes ({} batches)", filename, batch_memory, batches.len());
+            }
+        }
+
+        log_debug!("[RUST] Total memory usage across {} filtered writers (prefix: {}): {} bytes", writer_count, path_prefix, total_memory);
 
         Ok(total_memory)
     }
@@ -357,12 +509,19 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_clos
 ) -> jobject {
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
 
-    // Check if this file has sort config — we'll sort after closing the writer
-    let sort_config = SORT_CONFIG.remove(&filename).map(|(_, cfg)| cfg);
+    // Check if this file has sort config — in the deferred path, sorting is handled
+    // inside close_writer itself, so we only need the post-close sort for the
+    // non-deferred (normal) path.
+    let is_deferred = DEFERRED_BATCHES.contains_key(&filename);
+    let sort_config = if !is_deferred {
+        SORT_CONFIG.remove(&filename).map(|(_, cfg)| cfg)
+    } else {
+        None // deferred path handles sort internally
+    };
 
     match NativeParquetWriter::close_writer(filename.clone()) {
         Ok(maybe_metadata) => {
-            // Sort the file on close if sort config was set, and cache the permutation
+            // Sort the file on close only for the normal (non-deferred) path
             if let Some(cfg) = sort_config {
                 log_info!("[RUST] Sorting file on close: {} by '{}' (reverse={})",
                     filename, cfg.sort_column, cfg.reverse_sort);

@@ -386,7 +386,7 @@ impl From<RowIdMappingEntry> for SortPermutationEntry {
 // Helper: extract writer generation from filename
 // =============================================================================
 
-fn extract_writer_generation(path: &str) -> Option<String> {
+pub fn extract_writer_generation(path: &str) -> Option<String> {
     let filename = std::path::Path::new(path)
         .file_stem()
         .and_then(|n| n.to_str())?;
@@ -397,7 +397,7 @@ fn extract_writer_generation(path: &str) -> Option<String> {
 // Helper: rewrite ___row_id column in a batch with sequential IDs
 // =============================================================================
 
-fn rewrite_row_ids(batch: &RecordBatch, start_row_id: i64) -> MergeResult<RecordBatch> {
+pub fn rewrite_row_ids(batch: &RecordBatch, start_row_id: i64) -> MergeResult<RecordBatch> {
     let num_rows = batch.num_rows();
     let row_ids: Int64Array = (start_row_id..start_row_id + num_rows as i64).collect();
 

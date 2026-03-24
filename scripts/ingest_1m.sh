@@ -2,26 +2,28 @@
 # Ingest ~1M documents into a local OpenSearch single-node cluster
 # with optimized index (Parquet + Lucene composite engine).
 #
-# Usage: bash scripts/ingest_1m.sh [index_name] [sort: true|false]
+# Usage: bash scripts/ingest_1m.sh [index_name] [sort: true|false] [doc_count] [refresh_interval]
 #
 # Examples:
-#   bash scripts/ingest_1m.sh my_index true    # optimized + index sort on timestamp
-#   bash scripts/ingest_1m.sh my_index false   # optimized, no sort
-#   bash scripts/ingest_1m.sh my_index         # defaults to no sort
+#   bash scripts/ingest_1m.sh my_index true                # 10M docs, 30s refresh, sorted
+#   bash scripts/ingest_1m.sh my_index false               # 10M docs, 30s refresh, no sort
+#   bash scripts/ingest_1m.sh my_index true 1000000 10s    # 1M docs, 10s refresh, sorted
+#   bash scripts/ingest_1m.sh my_index false 500000 -1     # 500K docs, refresh disabled
 
 set -euo pipefail
 
 INDEX="${1:-benchmark_test}"
 SORT_ENABLED="${2:-false}"
+TOTAL_DOCS="${3:-10000000}"
+REFRESH_INTERVAL="${4:-30s}"
 HOST="http://localhost:9200"
-TOTAL_DOCS=10000000
 BATCH_SIZE=5000
 PARALLEL=8
 TMPDIR_BASE=$(mktemp -d)
 
 trap "rm -rf ${TMPDIR_BASE}" EXIT
 
-echo "=== Ingesting ${TOTAL_DOCS} docs into '${INDEX}' (optimized=true, sort=${SORT_ENABLED}) ==="
+echo "=== Ingesting ${TOTAL_DOCS} docs into '${INDEX}' (optimized=true, sort=${SORT_ENABLED}, refresh_interval=${REFRESH_INTERVAL}) ==="
 
 curl -s -X DELETE "${HOST}/${INDEX}" -o /dev/null 2>&1 || true
 
@@ -38,7 +40,7 @@ curl -s -X PUT "${HOST}/${INDEX}" -H 'Content-Type: application/json' -d "{
   \"settings\": {
     \"number_of_shards\": 1,
     \"number_of_replicas\": 0,
-    \"refresh_interval\": \"30s\",
+    \"refresh_interval\": \"${REFRESH_INTERVAL}\",
     \"index\": {
       \"translog.durability\": \"async\",
       \"translog.flush_threshold_size\": \"1gb\"${SORT_BLOCK}
