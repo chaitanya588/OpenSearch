@@ -139,7 +139,9 @@ impl NativeParquetWriter {
                         // Deferred mode: buffer the batch in memory instead of writing to disk.
                         if let Some(mut batches) = DEFERRED_BATCHES.get_mut(&filename) {
                             log_debug!("[RUST] Buffering RecordBatch in memory for deferred write (sort mode)");
-                            batches.push(record_batch);
+                            let owned_batch = copy_record_batch(&record_batch);
+                            drop(record_batch); // release FFI references
+                            batches.push(owned_batch);
                             return Ok(());
                         }
 
