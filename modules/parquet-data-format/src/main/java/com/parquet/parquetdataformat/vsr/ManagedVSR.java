@@ -122,8 +122,11 @@ public class ManagedVSR implements AutoCloseable {
         }
         setState(VSRState.CLOSED);
 
-        // Clean up resources
+        // Clean up resources — clear vectors first to release all buffers
+        // (including any intermediate buffers from vector reallocation),
+        // then close the VSR and allocator.
         if (vsr != null) {
+            vsr.clear();
             vsr.close();
         }
         if (allocator != null) {

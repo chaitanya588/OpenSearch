@@ -133,6 +133,14 @@ public class VSRManager implements AutoCloseable {
                 // Capture the sort permutation produced during sort-on-close (if any)
                 sortPermutation = writer.getSortPermutation();
             }
+
+            // Release the frozen VSR's Arrow buffers now that data has been written to Rust.
+            // Without this, the VSR's allocator retains all buffers until shutdown,
+            // causing the IndexingMemoryController to see inflated native memory and
+            // trigger unnecessary refresh/throttle cycles.
+            vsrPool.completeVSR(currentVSR);
+            managedVSR.set(null);
+
             logger.debug("Successfully flushed data for {} with metadata: {}", fileName, metadata);
 
             return metadata;

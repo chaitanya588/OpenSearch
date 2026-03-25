@@ -60,6 +60,18 @@ struct SortConfig {
 
 struct NativeParquetWriter;
 
+/// Deep-copies a RecordBatch into Rust-owned memory so that the original
+/// FFI-imported buffers (backed by Java's Arrow allocator) can be released
+/// immediately. Without this, deferred batches hold references to Java-side
+/// ArrowBuf memory, preventing the Java allocator from freeing them.
+fn copy_record_batch(batch: &RecordBatch) -> RecordBatch {
+    let schema = batch.schema();
+    // concat_batches with a single batch forces Arrow to allocate new buffers
+    // and memcpy the data, producing a fully Rust-owned RecordBatch.
+    arrow::compute::concat_batches(&schema, std::iter::once(batch))
+        .expect("Failed to deep-copy RecordBatch into Rust-owned memory")
+}
+
 impl NativeParquetWriter {
 
     fn create_writer(filename: String, schema_address: i64) -> Result<(), Box<dyn std::error::Error>> {
