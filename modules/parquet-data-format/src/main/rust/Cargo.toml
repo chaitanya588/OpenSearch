@@ -10,6 +10,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 
 arrow = { version = "54.0.0", features = ["ffi"] }
+arrow-ipc = "54.0.0"
 
 arrow-array = "54.0.0"
 arrow-schema = "54.0.0"

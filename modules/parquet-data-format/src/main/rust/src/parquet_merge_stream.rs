@@ -393,6 +393,11 @@ fn extract_writer_generation(path: &str) -> Option<String> {
     filename.rsplit('_').next().map(|s| s.to_string())
 }
 
+/// Public wrapper for extract_writer_generation, used by lib.rs IPC staging path.
+pub fn extract_writer_generation_pub(path: &str) -> Option<String> {
+    extract_writer_generation(path)
+}
+
 // =============================================================================
 // Helper: rewrite ___row_id column in a batch with sequential IDs
 // =============================================================================
@@ -413,6 +418,11 @@ fn rewrite_row_ids(batch: &RecordBatch, start_row_id: i64) -> MergeResult<Record
     }
 
     Ok(RecordBatch::try_new(schema, columns)?)
+}
+
+/// Public wrapper for rewrite_row_ids, used by lib.rs IPC staging path.
+pub fn rewrite_row_ids_pub(batch: &RecordBatch, start_row_id: i64) -> MergeResult<RecordBatch> {
+    rewrite_row_ids(batch, start_row_id)
 }
 
 // =============================================================================

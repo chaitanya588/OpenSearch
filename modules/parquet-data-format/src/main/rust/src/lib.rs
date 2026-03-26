@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 use parquet::format::FileMetaData as FormatFileMetaData;
 use parquet::file::metadata::FileMetaData as FileFileMetaData;
 use parquet::file::reader::{FileReader, SerializedFileReader};
+use arrow_ipc::writer::FileWriter as IpcFileWriter;
+use arrow_ipc::reader::FileReader as IpcFileReader;
 
 pub mod logger;
 pub mod parquet_merge;
@@ -35,6 +37,11 @@ pub use vectorized_exec_spi::{log_info, log_error, log_debug};
 lazy_static! {
     static ref WRITER_MANAGER: DashMap<String, Arc<Mutex<ArrowWriter<File>>>> = DashMap::new();
     static ref FILE_MANAGER: DashMap<String, File> = DashMap::new();
+    /// Manages Arrow IPC file writers for the sort-on-close path.
+    /// When a sort column is configured, batches are written as raw Arrow IPC
+    /// (no Parquet encoding/compression) to avoid the redundant encode→decode
+    /// cycle before sorting.
+    static ref IPC_WRITER_MANAGER: DashMap<String, Arc<Mutex<IpcFileWriter<File>>>> = DashMap::new();
     /// Tracks sort configuration per file. When a writer is created with a sort column,
     /// the config is stored here and applied when the writer is closed.
     static ref SORT_CONFIG: DashMap<String, SortConfig> = DashMap::new();
@@ -51,6 +58,9 @@ struct SortConfig {
     reverse_sort: bool,
 }
 
+/// Path suffix for the intermediate Arrow IPC file used during sort-on-close.
+const IPC_STAGING_SUFFIX: &str = ".arrow_ipc_staging";
+
 struct NativeParquetWriter;
 
 impl NativeParquetWriter {
@@ -63,7 +73,7 @@ impl NativeParquetWriter {
             return Err("Invalid schema address".into());
         }
 
-        if WRITER_MANAGER.contains_key(&filename) {
+        if WRITER_MANAGER.contains_key(&filename) || IPC_WRITER_MANAGER.contains_key(&filename) {
             log_error!("[RUST] ERROR: Writer already exists for file: {}", filename);
             return Err("Writer already exists for this file".into());
         }
@@ -77,14 +87,25 @@ impl NativeParquetWriter {
             log_debug!("[RUST] Field {}: {} ({})", i, field.name(), field.data_type());
         }
 
-        let file = File::create(&filename)?;
-        let file_clone = file.try_clone()?;
-        FILE_MANAGER.insert(filename.clone(), file_clone);
-        let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
-            .build();
-        let writer = ArrowWriter::try_new(file, schema, Some(props))?;
-        WRITER_MANAGER.insert(filename, Arc::new(Mutex::new(writer)));
+        // If sort config exists for this file, use Arrow IPC staging path
+        // to avoid redundant Parquet encode/decode before sorting.
+        if SORT_CONFIG.contains_key(&filename) {
+            let ipc_path = format!("{}{}", filename, IPC_STAGING_SUFFIX);
+            let file = File::create(&ipc_path)?;
+            let file_clone = file.try_clone()?;
+            FILE_MANAGER.insert(filename.clone(), file_clone);
+            let ipc_writer = IpcFileWriter::try_new(file, &schema)?;
+            IPC_WRITER_MANAGER.insert(filename, Arc::new(Mutex::new(ipc_writer)));
+        } else {
+            let file = File::create(&filename)?;
+            let file_clone = file.try_clone()?;
+            FILE_MANAGER.insert(filename.clone(), file_clone);
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+                .build();
+            let writer = ArrowWriter::try_new(file, schema, Some(props))?;
+            WRITER_MANAGER.insert(filename, Arc::new(Mutex::new(writer)));
+        }
         Ok(())
     }
 
@@ -119,13 +140,16 @@ impl NativeParquetWriter {
                             struct_array.columns().to_vec(),
                         )?;
 
-                        // log_debug!("[RUST] Created RecordBatch with {} rows and {} columns", record_batch.num_rows(), record_batch.num_columns());
-
-                        if let Some(writer_arc) = WRITER_MANAGER.get(&filename) {
-                            log_debug!("[RUST] Writing RecordBatch to file");
+                        // Check IPC writer first (sort-on-close path), then Parquet writer
+                        if let Some(writer_arc) = IPC_WRITER_MANAGER.get(&filename) {
+                            log_debug!("[RUST] Writing RecordBatch to IPC staging file");
                             let mut writer = writer_arc.lock().unwrap();
                             writer.write(&record_batch)?;
-                            // log_info!("[RUST] Successfully wrote RecordBatch");
+                            Ok(())
+                        } else if let Some(writer_arc) = WRITER_MANAGER.get(&filename) {
+                            log_debug!("[RUST] Writing RecordBatch to Parquet file");
+                            let mut writer = writer_arc.lock().unwrap();
+                            writer.write(&record_batch)?;
                             Ok(())
                         } else {
                             log_error!("[RUST] ERROR: No writer found for file: {}", filename);
@@ -147,14 +171,28 @@ impl NativeParquetWriter {
     fn close_writer(filename: String) -> Result<Option<FormatFileMetaData>, Box<dyn std::error::Error>> {
         // log_info!("[RUST] close_writer called for file: {}", filename);
 
-        if let Some((_, writer_arc)) = WRITER_MANAGER.remove(&filename) {
+        // Check if this is an IPC writer (sort-on-close path)
+        if let Some((_, ipc_writer_arc)) = IPC_WRITER_MANAGER.remove(&filename) {
+            match Arc::try_unwrap(ipc_writer_arc) {
+                Ok(mutex) => {
+                    let mut writer = mutex.into_inner().unwrap();
+                    writer.finish()?;
+                    // IPC writer is now closed; the staging file is complete.
+                    // Return None — the actual Parquet metadata will be produced
+                    // after sort-on-close in the JNI closeWriter entry point.
+                    Ok(None)
+                }
+                Err(_) => {
+                    log_error!("[RUST] ERROR: IPC Writer still in use for file: {}", filename);
+                    Err("IPC Writer still in use".into())
+                }
+            }
+        } else if let Some((_, writer_arc)) = WRITER_MANAGER.remove(&filename) {
             match Arc::try_unwrap(writer_arc) {
                 Ok(mutex) => {
                     let writer = mutex.into_inner().unwrap();
                     match writer.close() {
                         Ok(file_metadata) => {
-                            // log_info!("[RUST] Successfully closed writer for file: {}, metadata: version={}, num_rows={}\n",
-                            //     filename, file_metadata.version, file_metadata.num_rows);
                             Ok(Some(file_metadata))
                         }
                         Err(e) => {
@@ -172,6 +210,111 @@ impl NativeParquetWriter {
             log_error!("[RUST] ERROR: Writer not found for file: {}\n", filename);
             Err("Writer not found".into())
         }
+    }
+
+    /// Sort-on-close for the IPC staging path: reads Arrow IPC batches from the
+    /// staging file, sorts them, writes the final Parquet file, and cleans up
+    /// the staging file. Returns the Parquet file metadata.
+    fn sort_ipc_staging_and_write_parquet(
+        filename: &str,
+        sort_column: &str,
+        reverse_sort: bool,
+    ) -> Result<(FormatFileMetaData, Vec<parquet_merge_stream::SortPermutationEntry>), Box<dyn std::error::Error>> {
+        use arrow::compute::SortOptions;
+
+        let ipc_path = format!("{}{}", filename, IPC_STAGING_SUFFIX);
+
+        log_info!("[RUST] sort_ipc_staging: reading IPC staging file: {}", ipc_path);
+
+        // Read all batches from the Arrow IPC staging file
+        let ipc_file = File::open(&ipc_path)?;
+        let ipc_reader = IpcFileReader::try_new(ipc_file, None)?;
+        let schema = ipc_reader.schema();
+
+        let mut all_batches: Vec<RecordBatch> = Vec::new();
+        for batch_result in ipc_reader {
+            let batch = batch_result?;
+            if batch.num_rows() > 0 {
+                all_batches.push(batch);
+            }
+        }
+
+        if all_batches.is_empty() {
+            // Write an empty Parquet file
+            let out_file = File::create(filename)?;
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+                .build();
+            let writer = ArrowWriter::try_new(out_file, schema.clone(), Some(props))?;
+            let metadata = writer.close()?;
+            // Clean up staging file
+            let _ = std::fs::remove_file(&ipc_path);
+            return Ok((metadata, Vec::new()));
+        }
+
+        // Concatenate all batches into one
+        let combined = arrow::compute::concat_batches(&schema, all_batches.iter())?;
+
+        // Find sort column index
+        let sort_col_idx = schema.fields().iter().position(|f| f.name() == sort_column)
+            .ok_or_else(|| format!(
+                "Sort column '{}' not found in IPC staging file '{}'", sort_column, ipc_path
+            ))?;
+
+        // Sort using arrow::compute::sort_to_indices + take
+        let sort_col = combined.column(sort_col_idx);
+        let options = SortOptions {
+            descending: reverse_sort,
+            nulls_first: true,
+        };
+        let indices = arrow::compute::sort_to_indices(sort_col, Some(options), None)?;
+
+        // Build the sort permutation
+        let file_id = parquet_merge_stream::extract_writer_generation_pub(filename)
+            .unwrap_or_else(|| {
+                std::path::Path::new(filename)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(filename)
+                    .to_string()
+            });
+
+        let num_rows = indices.len();
+        let mut permutation: Vec<parquet_merge_stream::SortPermutationEntry> = Vec::with_capacity(num_rows);
+        for new_row_id in 0..num_rows {
+            let old_row_id = indices.value(new_row_id) as i64;
+            permutation.push(parquet_merge_stream::SortPermutationEntry {
+                old_file_id: file_id.clone(),
+                old_row_id,
+                new_row_id: new_row_id as i64,
+            });
+        }
+
+        // Apply sort indices to all columns
+        let sorted_columns: Vec<Arc<dyn arrow::array::Array>> = combined.columns().iter()
+            .map(|col| arrow::compute::take(col.as_ref(), &indices, None))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let sorted_batch = RecordBatch::try_new(schema.clone(), sorted_columns)?;
+
+        // Rewrite ___row_id column with sequential values
+        let final_batch = parquet_merge_stream::rewrite_row_ids_pub(&sorted_batch, 0)?;
+
+        // Write the final sorted Parquet file
+        let out_file = File::create(filename)?;
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+            .build();
+        let mut writer = ArrowWriter::try_new(out_file, schema, Some(props))?;
+        writer.write(&final_batch)?;
+        let metadata = writer.close()?;
+
+        // Clean up the IPC staging file
+        let _ = std::fs::remove_file(&ipc_path);
+
+        log_info!("[RUST] sort_ipc_staging: sorted {} rows, wrote Parquet to {}", num_rows, filename);
+
+        Ok((metadata, permutation))
     }
 
     fn flush_to_disk(filename: String) -> Result<(), Box<dyn std::error::Error>> {
@@ -315,7 +458,8 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_crea
 ) -> jint {
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
 
-    // Store sort config if a sort column is provided
+    // Store sort config if a sort column is provided.
+    // create_writer checks SORT_CONFIG to decide IPC vs Parquet path.
     if !sort_column.is_null() {
         let sort_col_str: String = env.get_string(&sort_column)
             .map(|s| s.into())
@@ -357,46 +501,57 @@ pub extern "system" fn Java_com_parquet_parquetdataformat_bridge_RustBridge_clos
 ) -> jobject {
     let filename: String = env.get_string(&file).expect("Couldn't get java string!").into();
 
-    // Check if this file has sort config — we'll sort after closing the writer
+    // Check if this file has sort config — determines whether we used IPC staging
     let sort_config = SORT_CONFIG.remove(&filename).map(|(_, cfg)| cfg);
 
     match NativeParquetWriter::close_writer(filename.clone()) {
         Ok(maybe_metadata) => {
-            // Sort the file on close if sort config was set, and cache the permutation
             if let Some(cfg) = sort_config {
-                log_info!("[RUST] Sorting file on close: {} by '{}' (reverse={})",
+                // IPC staging path: the IPC writer was closed (returning None metadata).
+                // Now read the IPC staging file, sort, and write final Parquet.
+                log_info!("[RUST] Sort-on-close (IPC path): {} by '{}' (reverse={})",
                     filename, cfg.sort_column, cfg.reverse_sort);
-                match parquet_merge_stream::sort_parquet_file(
+                match NativeParquetWriter::sort_ipc_staging_and_write_parquet(
                     &filename, &cfg.sort_column, cfg.reverse_sort
                 ) {
-                    Ok(mappings) => {
-                        let permutation: Vec<parquet_merge_stream::SortPermutationEntry> =
-                            mappings.into_iter().map(|m| m.into()).collect();
+                    Ok((metadata, permutation)) => {
                         log_info!("[RUST] Sort-on-close produced {} permutation entries for {}",
                             permutation.len(), filename);
                         SORT_PERMUTATION.insert(filename.clone(), permutation);
-                    }
-                    Err(e) => {
-                        log_error!("[RUST] Sort-on-close failed for {}: {}", filename, e);
-                        // Non-fatal: file is still valid, just unsorted
-                    }
-                }
-            }
 
-            match maybe_metadata {
-                Some(metadata) => {
-                    match NativeParquetWriter::create_java_metadata(&mut env, &metadata) {
-                        Ok(java_obj) => java_obj.into_raw(),
-                        Err(e) => {
-                            let error_msg = format!("[RUST] ERROR: Failed to create Java metadata object: {:?}\n", e);
-                            log_error!("{}", error_msg.trim());
-                            let _ = env.throw_new("java/io/IOException", "Failed to create metadata object");
-                            JObject::null().into_raw()
+                        match NativeParquetWriter::create_java_metadata(&mut env, &metadata) {
+                            Ok(java_obj) => java_obj.into_raw(),
+                            Err(e) => {
+                                log_error!("[RUST] ERROR: Failed to create Java metadata: {:?}", e);
+                                let _ = env.throw_new("java/io/IOException", "Failed to create metadata object");
+                                JObject::null().into_raw()
+                            }
                         }
                     }
+                    Err(e) => {
+                        log_error!("[RUST] Sort-on-close (IPC path) failed for {}: {}", filename, e);
+                        let _ = env.throw_new("java/io/IOException",
+                            &format!("Sort-on-close failed: {}", e));
+                        JObject::null().into_raw()
+                    }
                 }
-                None => {
-                    JObject::null().into_raw()
+            } else {
+                // Standard Parquet path — no sorting needed
+                match maybe_metadata {
+                    Some(metadata) => {
+                        match NativeParquetWriter::create_java_metadata(&mut env, &metadata) {
+                            Ok(java_obj) => java_obj.into_raw(),
+                            Err(e) => {
+                                let error_msg = format!("[RUST] ERROR: Failed to create Java metadata object: {:?}\n", e);
+                                log_error!("{}", error_msg.trim());
+                                let _ = env.throw_new("java/io/IOException", "Failed to create metadata object");
+                                JObject::null().into_raw()
+                            }
+                        }
+                    }
+                    None => {
+                        JObject::null().into_raw()
+                    }
                 }
             }
         }
