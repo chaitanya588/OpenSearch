@@ -2,28 +2,30 @@
 # Ingest ~1M documents into a local OpenSearch single-node cluster
 # with optimized index (Parquet + Lucene composite engine).
 #
-# Usage: bash scripts/ingest_1m.sh [index_name] [sort: true|false] [doc_count] [refresh_interval]
+# Usage: bash scripts/ingest_1m.sh [index_name] [optimized: true|false] [sort: true|false] [doc_count] [refresh_interval]
 #
 # Examples:
-#   bash scripts/ingest_1m.sh my_index true                # 10M docs, 30s refresh, sorted
-#   bash scripts/ingest_1m.sh my_index false               # 10M docs, 30s refresh, no sort
-#   bash scripts/ingest_1m.sh my_index true 1000000 10s    # 1M docs, 10s refresh, sorted
-#   bash scripts/ingest_1m.sh my_index false 500000 -1     # 500K docs, refresh disabled
+#   bash scripts/ingest_1m.sh my_index                            # 10M docs, 30s refresh, optimized, no sort
+#   bash scripts/ingest_1m.sh my_index true true                  # 10M docs, 30s refresh, optimized, sorted
+#   bash scripts/ingest_1m.sh my_index false true                 # 10M docs, 30s refresh, NOT optimized, sorted
+#   bash scripts/ingest_1m.sh my_index true true 1000000 10s      # 1M docs, 10s refresh, optimized, sorted
+#   bash scripts/ingest_1m.sh my_index false false 500000 -1      # 500K docs, refresh disabled, NOT optimized, no sort
 
 set -euo pipefail
 
 INDEX="${1:-benchmark_test}"
-SORT_ENABLED="${2:-false}"
-TOTAL_DOCS="${3:-10000000}"
-REFRESH_INTERVAL="${4:-30s}"
+OPTIMIZED="${2:-true}"
+SORT_ENABLED="${3:-false}"
+TOTAL_DOCS="${4:-10000000}"
+REFRESH_INTERVAL="${5:-30s}"
 HOST="http://localhost:9200"
 BATCH_SIZE=5000
-PARALLEL=8
+PARALLEL=16
 TMPDIR_BASE=$(mktemp -d)
 
 trap "rm -rf ${TMPDIR_BASE}" EXIT
-
-echo "=== Ingesting ${TOTAL_DOCS} docs into '${INDEX}' (optimized=true, sort=${SORT_ENABLED}, refresh_interval=${REFRESH_INTERVAL}) ==="
+echo "dateformat=\""`date +"%Y-%m-%dT%H:%M:%S"`"\""
+echo "=== Ingesting ${TOTAL_DOCS} docs into '${INDEX}' (optimized=${OPTIMIZED}, sort=${SORT_ENABLED}, refresh_interval=${REFRESH_INTERVAL}) ==="
 
 curl -s -X DELETE "${HOST}/${INDEX}" -o /dev/null 2>&1 || true
 
@@ -36,6 +38,16 @@ if [ "$SORT_ENABLED" = "true" ]; then
   echo "Index sort enabled on field: timestamp (asc)"
 fi
 
+# Build optimized block
+OPTIMIZED_BLOCK=""
+if [ "$OPTIMIZED" = "true" ]; then
+  OPTIMIZED_BLOCK=',
+      "optimized.enabled": true'
+else
+  OPTIMIZED_BLOCK=',
+      "optimized.enabled": false'
+fi
+
 curl -s -X PUT "${HOST}/${INDEX}" -H 'Content-Type: application/json' -d "{
   \"settings\": {
     \"number_of_shards\": 1,
@@ -43,7 +55,7 @@ curl -s -X PUT "${HOST}/${INDEX}" -H 'Content-Type: application/json' -d "{
     \"refresh_interval\": \"${REFRESH_INTERVAL}\",
     \"index\": {
       \"translog.durability\": \"async\",
-      \"translog.flush_threshold_size\": \"1gb\"${SORT_BLOCK}
+      \"translog.flush_threshold_size\": \"1gb\"${SORT_BLOCK}${OPTIMIZED_BLOCK}
     }
   },
   \"mappings\": {
@@ -62,7 +74,7 @@ curl -s -X PUT "${HOST}/${INDEX}" -H 'Content-Type: application/json' -d "{
   }
 }" -o /dev/null
 
-echo "Index '${INDEX}' created (optimized)."
+echo "Index '${INDEX}' created (optimized=${OPTIMIZED})."
 
 STATUSES=("active" "pending" "completed" "failed" "archived")
 CATEGORIES=("electronics" "clothing" "food" "sports" "books" "home" "auto" "health")
@@ -145,7 +157,7 @@ fi
 echo ""
 echo "=== Done ==="
 echo "  Documents sent: ${TOTAL_DOCS}"
-echo "  Optimized index: true"
+echo "  Optimized index: ${OPTIMIZED}"
 echo "  Sort enabled: ${SORT_ENABLED}"
 if [ "$SORT_ENABLED" = "true" ]; then
   echo "  Sort field: timestamp (asc)"

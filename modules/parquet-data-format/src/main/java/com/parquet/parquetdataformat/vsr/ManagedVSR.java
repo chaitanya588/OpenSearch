@@ -155,22 +155,27 @@ public class ManagedVSR implements AutoCloseable {
             throw new IllegalStateException("Cannot export VSR in state: " + state + ". VSR must be FROZEN to export.");
         }
 
-        ArrowArray arrowArray = ArrowArray.allocateNew(allocator);
-        ArrowSchema arrowSchema = ArrowSchema.allocateNew(allocator);
+        // Use a dedicated child allocator for the C Data Interface structs so that
+        // export-related allocations don't pollute the VSR's allocator ledger.
+        // This allocator is closed by ArrowExport.close() after Rust consumes the data.
+        BufferAllocator exportAllocator = allocator.newChildAllocator("export-" + id, 0, allocator.getLimit());
+        ArrowArray arrowArray = ArrowArray.allocateNew(exportAllocator);
+        ArrowSchema arrowSchema = ArrowSchema.allocateNew(exportAllocator);
 
         // Export the VectorSchemaRoot to C Data Interface
-        Data.exportVectorSchemaRoot(allocator, vsr, null, arrowArray, arrowSchema);
+        Data.exportVectorSchemaRoot(exportAllocator, vsr, null, arrowArray, arrowSchema);
 
-        return new ArrowExport(arrowArray, arrowSchema);
+        return new ArrowExport(arrowArray, arrowSchema, exportAllocator);
     }
 
     public ArrowExport exportSchema() {
-        ArrowSchema arrowSchema = ArrowSchema.allocateNew(allocator);
+        BufferAllocator exportAllocator = allocator.newChildAllocator("schema-export-" + id, 0, allocator.getLimit());
+        ArrowSchema arrowSchema = ArrowSchema.allocateNew(exportAllocator);
 
         // Export the VectorSchemaRoot to C Data Interface
-        Data.exportSchema(allocator, vsr.getSchema(), null, arrowSchema);
+        Data.exportSchema(exportAllocator, vsr.getSchema(), null, arrowSchema);
 
-        return new ArrowExport(null, arrowSchema);
+        return new ArrowExport(null, arrowSchema, exportAllocator);
     }
 
     /**
