@@ -8,17 +8,19 @@
 
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use arrow::record_batch::RecordBatch;
-use arrow::compute::{lexsort_to_indices, take, SortColumn};
+use arrow::compute::{concat_batches, lexsort_to_indices, take, SortColumn};
+use arrow_ipc::writer::FileWriter as IpcFileWriter;
+use arrow_ipc::reader::FileReader as IpcFileReader;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
+use parquet::arrow::ArrowWriter;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::{log_error, log_debug};
+use crate::{log_error, log_debug, log_info};
 use crate::merge::{merge_sorted, schema::ROW_ID_COLUMN_NAME};
 use crate::native_settings::NativeSettings;
 use crate::writer_properties_builder::WriterPropertiesBuilder;
@@ -30,16 +32,33 @@ pub struct FinalizeResult {
     pub crc32: u32,
 }
 
+/// The underlying writer — either direct Parquet or Arrow IPC staging.
+/// When sort columns are configured, the IPC variant is used to avoid the
+/// redundant Parquet encode→decode cycle before sorting. Arrow IPC is
+/// essentially a memory dump of Arrow batches — near-zero serialization cost.
+enum WriterVariant {
+    /// Direct Parquet writer — used when no sort columns are configured.
+    Parquet(Arc<Mutex<ArrowWriter<File>>>),
+    /// Arrow IPC staging writer — used when sort columns are configured.
+    /// Batches are written as raw Arrow IPC; on close they are read back,
+    /// sorted, and written as a single Parquet file.
+    Ipc(Arc<Mutex<IpcFileWriter<File>>>),
+}
+
 /// Bundles all per-writer resources so a single `DashMap::remove` atomically
 /// drops the writer, closes the file handle, and cleans up sort config.
 struct WriterState {
-    writer: Arc<Mutex<ArrowWriter<File>>>,
+    variant: WriterVariant,
     file_handle: File,
     settings: NativeSettings,
 }
 
+/// Path suffix for the intermediate Arrow IPC file used during sort-on-close.
+const IPC_STAGING_SUFFIX: &str = ".arrow_ipc_staging";
+
 lazy_static! {
     /// Unified per-writer registry. Keyed by temp filename.
+    /// Holds both Parquet and IPC writers via the `WriterVariant` enum.
     static ref WRITERS: DashMap<String, WriterState> = DashMap::new();
     pub static ref SETTINGS_STORE: DashMap<String, NativeSettings> = DashMap::new();
     /// Holds file handles for finalized files pending fsync. Removed after sync.
@@ -93,9 +112,6 @@ impl NativeParquetWriter {
         let schema = Arc::new(arrow::datatypes::Schema::try_from(&arrow_schema)?);
         log_debug!("Schema created with {} fields", schema.fields().len());
 
-        let file = File::create(&temp_filename)?;
-        let file_clone = file.try_clone()?;
-
         let mut settings: NativeSettings = SETTINGS_STORE
             .get(&index_name)
             .map(|r| r.clone())
@@ -105,14 +121,26 @@ impl NativeParquetWriter {
         settings.reverse_sorts = reverse_sorts;
         settings.nulls_first = nulls_first;
 
-        let props = WriterPropertiesBuilder::build(&settings);
-
         SETTINGS_STORE.insert(index_name, settings.clone());
 
-        let writer = ArrowWriter::try_new(file, schema, Some(props))?;
+        // If sort columns are configured, use Arrow IPC staging path to avoid
+        // the redundant Parquet encode→decode cycle before sorting.
+        let (variant, file_clone) = if !settings.sort_columns.is_empty() {
+            let ipc_path = format!("{}{}", temp_filename, IPC_STAGING_SUFFIX);
+            let file = File::create(&ipc_path)?;
+            let file_clone = file.try_clone()?;
+            let ipc_writer = IpcFileWriter::try_new(file, &schema)?;
+            (WriterVariant::Ipc(Arc::new(Mutex::new(ipc_writer))), file_clone)
+        } else {
+            let file = File::create(&temp_filename)?;
+            let file_clone = file.try_clone()?;
+            let props = WriterPropertiesBuilder::build(&settings);
+            let writer = ArrowWriter::try_new(file, schema, Some(props))?;
+            (WriterVariant::Parquet(Arc::new(Mutex::new(writer))), file_clone)
+        };
 
         WRITERS.insert(temp_filename, WriterState {
-            writer: Arc::new(Mutex::new(writer)),
+            variant,
             file_handle: file_clone,
             settings,
         });
@@ -140,9 +168,20 @@ impl NativeParquetWriter {
                 let record_batch = RecordBatch::try_new(schema, struct_array.columns().to_vec())?;
                 log_debug!("Created RecordBatch with {} rows and {} columns", record_batch.num_rows(), record_batch.num_columns());
 
+                // Write to the appropriate writer variant
                 if let Some(state) = WRITERS.get(&temp_filename) {
-                    let mut writer = state.writer.lock().unwrap();
-                    writer.write(&record_batch)?;
+                    match &state.variant {
+                        WriterVariant::Ipc(writer_arc) => {
+                            log_debug!("Writing RecordBatch to IPC staging file");
+                            let mut writer = writer_arc.lock().unwrap();
+                            writer.write(&record_batch)?;
+                        }
+                        WriterVariant::Parquet(writer_arc) => {
+                            log_debug!("Writing RecordBatch to Parquet file");
+                            let mut writer = writer_arc.lock().unwrap();
+                            writer.write(&record_batch)?;
+                        }
+                    }
                     Ok(())
                 } else {
                     log_error!("ERROR: No writer found for temp file: {}", temp_filename);
@@ -160,21 +199,20 @@ impl NativeParquetWriter {
         log_debug!("finalize_writer called for file: {} (temp: {})", filename, temp_filename);
 
         if let Some((_, state)) = WRITERS.remove(&temp_filename) {
-            let WriterState { writer: writer_arc, file_handle: _file, settings } = state;
+            let WriterState { variant, file_handle: _file, settings } = state;
             let index_name = settings.index_name.as_deref().unwrap_or("");
-            match Arc::try_unwrap(writer_arc) {
-                Ok(mutex) => {
-                    let writer = mutex.into_inner().unwrap();
-                    match writer.close() {
-                        Ok(_) => {
-                            log_debug!("Successfully closed temp writer for: {}", temp_filename);
-                            // _file is dropped here, closing the file handle
 
-                            Self::sort_and_rewrite_parquet(&temp_filename, &filename, index_name, &settings.sort_columns, &settings.reverse_sorts, &settings.nulls_first)?;
+            match variant {
+                WriterVariant::Ipc(writer_arc) => {
+                    match Arc::try_unwrap(writer_arc) {
+                        Ok(mutex) => {
+                            let mut writer = mutex.into_inner().unwrap();
+                            writer.finish()?;
+                            log_info!("Successfully closed IPC staging writer for: {}", temp_filename);
 
-                            if let Err(e) = std::fs::remove_file(&temp_filename) {
-                                log_error!("Failed to remove temp file {}: {}", temp_filename, e);
-                            }
+                            let ipc_path = format!("{}{}", temp_filename, IPC_STAGING_SUFFIX);
+                            Self::sort_and_rewrite_parquet(&ipc_path, &filename, index_name, &settings.sort_columns, &settings.reverse_sorts, &settings.nulls_first)?;
+                            let _ = std::fs::remove_file(&ipc_path);
 
                             // Compute CRC32 by reading the final sorted file
                             let crc32 = Self::compute_file_crc32(&filename)?;
@@ -191,15 +229,49 @@ impl NativeParquetWriter {
 
                             Ok(Some(FinalizeResult { metadata: parquet_metadata, crc32 }))
                         }
-                        Err(e) => {
-                            log_error!("ERROR: Failed to close writer for temp file: {}", temp_filename);
-                            Err(e.into())
+                        Err(_) => {
+                            log_error!("ERROR: IPC Writer still in use for temp file: {}", temp_filename);
+                            Err("IPC Writer still in use".into())
                         }
                     }
                 }
-                Err(_) => {
-                    log_error!("ERROR: Writer still in use for temp file: {}", temp_filename);
-                    Err("Writer still in use".into())
+                WriterVariant::Parquet(writer_arc) => {
+                    match Arc::try_unwrap(writer_arc) {
+                        Ok(mutex) => {
+                            let writer = mutex.into_inner().unwrap();
+                            match writer.close() {
+                                Ok(_) => {
+                                    log_info!("Successfully closed temp writer for: {}", temp_filename);
+
+                                    // Parquet variant is used for non-sorted data; just rename.
+                                    std::fs::rename(&temp_filename, &filename)?;
+
+                                    // Compute CRC32 by reading the final sorted file
+                                    let crc32 = Self::compute_file_crc32(&filename)?;
+                                    log_debug!("CRC32 for file {}: {:#010x}", filename, crc32);
+
+                                    // Keep a handle for sync_to_disk
+                                    let file_for_sync = File::open(&filename)?;
+                                    FILE_MANAGER.insert(filename.clone(), file_for_sync);
+
+                                    // Read full ParquetMetaData from the final file
+                                    let file = File::open(&filename)?;
+                                    let reader = SerializedFileReader::new(file)?;
+                                    let parquet_metadata = reader.metadata().clone();
+
+                                    Ok(Some(FinalizeResult { metadata: parquet_metadata, crc32 }))
+                                }
+                                Err(e) => {
+                                    log_error!("ERROR: Failed to close writer for temp file: {}", temp_filename);
+                                    Err(e.into())
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            log_error!("ERROR: Writer still in use for temp file: {}", temp_filename);
+                            Err("Writer still in use".into())
+                        }
+                    }
                 }
             }
         } else {
@@ -220,6 +292,13 @@ impl NativeParquetWriter {
         Ok(hasher.finalize())
     }
 
+    /// Sort-on-close: reads batches from the temp file, sorts them,
+    /// and writes the final Parquet file.
+    ///
+    /// Uses a size-based threshold to choose the strategy:
+    /// - Small files: concat all batches in memory, sort, write.
+    /// - Large files: sort each batch individually (sliced to batch_size),
+    ///   write sorted chunks as Parquet, then streaming k-way merge.
     fn sort_and_rewrite_parquet(
         temp_filename: &str,
         output_filename: &str,
@@ -232,12 +311,6 @@ impl NativeParquetWriter {
             "sort_and_rewrite_parquet: temp={}, output={}, sort_columns={:?}, reverse_sorts={:?}, nulls_first={:?}",
             temp_filename, output_filename, sort_columns, reverse_sorts, nulls_first
         );
-
-        if sort_columns.is_empty() {
-            log_debug!("No sort columns specified, renaming temp file to final");
-            std::fs::rename(temp_filename, output_filename)?;
-            return Ok(());
-        }
 
         let config = SETTINGS_STORE
             .get(index_name)
@@ -253,7 +326,8 @@ impl NativeParquetWriter {
         }
     }
 
-    /// In-memory sort for small files: read all batches, concat, sort, rewrite row IDs, write.
+    /// In-memory sort for small files: read all batches, concat, sort,
+    /// rewrite row IDs, write final Parquet.
     fn sort_small_file(
         temp_filename: &str,
         output_filename: &str,
@@ -265,31 +339,45 @@ impl NativeParquetWriter {
         log_debug!("Using in-memory sort for small file: {}", temp_filename);
 
         let file = File::open(temp_filename)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let row_count = builder.metadata().file_metadata().num_rows() as usize;
-        let arrow_reader = builder.with_batch_size(row_count).build()?;
+        let reader = IpcFileReader::try_new(file, None)?;
+        let schema = reader.schema();
 
-        let batch = match arrow_reader.into_iter().next() {
-            Some(Ok(b)) if b.num_rows() > 0 => b,
-            Some(Err(e)) => return Err(e.into()),
-            _ => {
-                log_debug!("No data to sort in file: {}", temp_filename);
-                std::fs::rename(temp_filename, output_filename)?;
-                return Ok(());
+        let mut all_batches: Vec<RecordBatch> = Vec::new();
+        for batch_result in reader {
+            let batch = batch_result?;
+            if batch.num_rows() > 0 {
+                all_batches.push(batch);
             }
-        };
+        }
 
-        let schema = batch.schema();
-        let sorted_batch = Self::sort_batch(&batch, sort_columns, reverse_sorts, nulls_first)?;
+        if all_batches.is_empty() {
+            log_info!("No data in temp file: {}", temp_filename);
+            let props = WriterPropertiesBuilder::build(
+                &SETTINGS_STORE.get(index_name).map(|r| r.clone()).unwrap_or_default(),
+            );
+            let file = File::create(output_filename)?;
+            let writer = ArrowWriter::try_new(file, schema, Some(props))?;
+            writer.close()?;
+            return Ok(());
+        }
+
+        let combined_batch = concat_batches(&schema, &all_batches)?;
+        let sorted_batch = Self::sort_batch(&combined_batch, sort_columns, reverse_sorts, nulls_first)?;
         let final_batch = Self::rewrite_row_ids(&sorted_batch, &schema)?;
 
         Self::write_final_file(output_filename, index_name, &final_batch, schema)?;
+
+        log_info!(
+            "sort_small_file: sorted {} rows, wrote Parquet to {}",
+            final_batch.num_rows(),
+            output_filename
+        );
         Ok(())
     }
 
-    /// For large files: read in batches, sort each batch individually, write each
-    /// as a separate sorted chunk file, then use the streaming k-way merge to
-    /// produce the final globally-sorted output.
+    /// For large files: read batches, slice each to `batch_size` rows,
+    /// sort each slice individually, write it as a Parquet chunk file, then
+    /// use the streaming k-way merge to produce the final globally-sorted output.
     fn sort_large_file(
         temp_filename: &str,
         output_filename: &str,
@@ -302,37 +390,60 @@ impl NativeParquetWriter {
         log_debug!("Using streaming merge sort for large file: {}", temp_filename);
 
         let file = File::open(temp_filename)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let arrow_reader = builder.with_batch_size(batch_size).build()?;
+        let reader = IpcFileReader::try_new(file, None)?;
+        let schema = reader.schema();
 
         let mut chunk_paths: Vec<String> = Vec::new();
         let mut batch_count = 0;
         let temp_dir = std::env::temp_dir();
 
-        for batch_result in arrow_reader {
+        for batch_result in reader {
             let batch = batch_result?;
-            let schema = batch.schema();
-            let sorted_batch = Self::sort_batch(&batch, sort_columns, reverse_sorts, nulls_first)?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
 
-            let chunk_filename = temp_dir
-                .join(format!("sort_chunk_{}_{}.parquet", batch_count, std::process::id()))
-                .to_string_lossy()
-                .to_string();
-            Self::write_final_file(&chunk_filename, index_name, &sorted_batch, schema)?;
+            // IpcFileReader returns batches at whatever size they were written.
+            // Slice into batch_size chunks to bound memory during sort.
+            let mut offset = 0;
+            while offset < batch.num_rows() {
+                let len = std::cmp::min(batch_size, batch.num_rows() - offset);
+                let slice = batch.slice(offset, len);
+                offset += len;
 
-            chunk_paths.push(chunk_filename);
-            batch_count += 1;
+                let sorted_batch = Self::sort_batch(&slice, sort_columns, reverse_sorts, nulls_first)?;
+
+                let chunk_filename = temp_dir
+                    .join(format!(
+                        "sort_chunk_{}_{}.parquet",
+                        batch_count,
+                        std::process::id()
+                    ))
+                    .to_string_lossy()
+                    .to_string();
+                Self::write_final_file(&chunk_filename, index_name, &sorted_batch, schema.clone())?;
+
+                chunk_paths.push(chunk_filename);
+                batch_count += 1;
+            }
         }
 
         if chunk_paths.is_empty() {
-            log_debug!("No data to sort in file: {}", temp_filename);
-            std::fs::rename(temp_filename, output_filename)?;
+            log_info!("No data in temp file: {}", temp_filename);
+            let props = WriterPropertiesBuilder::build(
+                &SETTINGS_STORE.get(index_name).map(|r| r.clone()).unwrap_or_default(),
+            );
+            let file = File::create(output_filename)?;
+            let writer = ArrowWriter::try_new(file, schema, Some(props))?;
+            writer.close()?;
             return Ok(());
         }
 
-        log_debug!("Created {} sorted chunks, merging via streaming k-way merge", batch_count);
+        log_debug!(
+            "Created {} sorted Parquet chunks, merging via streaming k-way merge",
+            batch_count
+        );
 
-        // Use the streaming merge to produce the final sorted file
         merge_sorted(
             &chunk_paths,
             output_filename,
@@ -340,13 +451,21 @@ impl NativeParquetWriter {
             sort_columns,
             reverse_sorts,
             nulls_first,
-        ).map_err(|e| -> Box<dyn std::error::Error> { format!("Streaming merge failed: {}", e).into() })?;
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            format!("Streaming merge failed: {}", e).into()
+        })?;
 
         // Clean up temp chunk files
         for path in &chunk_paths {
             let _ = std::fs::remove_file(path);
         }
 
+        log_info!(
+            "sort_large_file: merged {} chunks, wrote Parquet to {}",
+            batch_count,
+            output_filename
+        );
         Ok(())
     }
 
@@ -443,8 +562,10 @@ impl NativeParquetWriter {
         let mut total_memory = 0;
         for entry in WRITERS.iter() {
             if entry.key().starts_with(&path_prefix) {
-                if let Ok(writer) = entry.value().writer.lock() {
-                    total_memory += writer.memory_size();
+                if let WriterVariant::Parquet(writer_arc) = &entry.value().variant {
+                    if let Ok(writer) = writer_arc.lock() {
+                        total_memory += writer.memory_size();
+                    }
                 }
             }
         }
