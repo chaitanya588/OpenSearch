@@ -61,6 +61,7 @@ lazy_static = "1.4.0"
 thiserror = "1.0"
 async-trait = "0.1"
 bytes = "1"
+rayon = "1.10"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 # Internal
