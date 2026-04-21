@@ -79,7 +79,7 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
      * Creates a new LuceneCommitter. Trims unsafe commits (via {@link SafeBootstrapCommitter}),
      * then opens the IndexWriter.
      *
-     * @param committerConfig the committer committerConfig (shard path, index committerConfig, engine config, store)
+     * @param committerConfig the committer config (engine config, store)
      * @throws IOException if opening the IndexWriter fails
      */
     public LuceneCommitter(CommitterConfig committerConfig) throws IOException {
@@ -95,8 +95,6 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
             throw e;
         }
     }
-
-    // --- Committer interface ---
 
     /**
      * Atomically persists the given commit data (catalog snapshot, translog UUID,
@@ -225,18 +223,6 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
         iwc.setRAMBufferSizeMB(engineConfig.getIndexingBufferSize().getMbFrac());
         iwc.setUseCompoundFile(engineConfig.useCompoundFile());
 
-        // Determine if Lucene is a secondary format in a composite setup.
-        // When secondary, use RowIdRemappingSortField so MultiSorter can reorder documents
-        // by remapped ___row_id during merge. When primary (or standalone), use the
-        // engine config's IndexSort (which may be user-configured).
-        List<String> secondaryFormats = engineConfig.getIndexSettings().getSettings().getAsList("index.composite.secondary_data_formats");
-        boolean isSecondary = secondaryFormats.contains("lucene");
-
-        if (isSecondary) {
-            iwc.setIndexSort(new Sort(new RowIdRemappingSortField("___row_id")));
-        } else if (engineConfig.getIndexSort() != null) {
-            iwc.setIndexSort(engineConfig.getIndexSort());
-        }
         iwc.setCommitOnClose(false);
         iwc.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
         iwc.setIndexDeletionPolicy(deletionPolicy);

@@ -19,6 +19,7 @@ import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.misc.store.HardlinkCopyDirectoryWrapper;
+import org.apache.lucene.search.Sort;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.MMapDirectory;
 import org.opensearch.be.lucene.LuceneDataFormat;
@@ -167,10 +168,16 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
     public Writer<LuceneDocumentInput> createWriter(long writerGeneration) {
         assert sharedWriter.isOpen() : "Cannot create writer — shared IndexWriter is closed";
         try {
-            return new LuceneWriter(writerGeneration, dataFormat, baseDirectory, analyzer, codec, sharedWriter.getConfig().getIndexSort());
+            Sort indexSort = isIndexNeedToBeSortedInternally() ? sharedWriter.getConfig().getIndexSort() : null;
+            return new LuceneWriter(writerGeneration, dataFormat, baseDirectory, analyzer, codec, indexSort);
         } catch (IOException e) {
             throw new RuntimeException("Failed to create LuceneWriter for generation " + writerGeneration, e);
         }
+    }
+
+    //TODO: Ignoring internal lucene sort implementation for now and honour externally provided sort order.
+    private boolean isIndexNeedToBeSortedInternally() {
+        return false;
     }
 
     /**

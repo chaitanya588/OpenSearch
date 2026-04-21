@@ -15,6 +15,8 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.FileInfos;
+import org.opensearch.index.engine.dataformat.FlushInput;
+import org.opensearch.index.engine.dataformat.WriteResult;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.NumberFieldMapper;
@@ -101,7 +103,7 @@ public class ParquetWriterTests extends OpenSearchTestCase {
             doc.close();
         }
 
-        FileInfos fileInfos = writer.flush();
+        FileInfos fileInfos = writer.flush(FlushInput.EMPTY);
         assertNotNull(fileInfos);
         assertTrue(Files.exists(Path.of(filePath)));
         assertEquals(10, RustBridge.getFileMetadata(filePath).numRows());
@@ -127,7 +129,7 @@ public class ParquetWriterTests extends OpenSearchTestCase {
         writer.addDoc(doc);
         doc.close();
 
-        writer.flush();
+        writer.flush(FlushInput.EMPTY);
         writer.sync();
         assertTrue(Files.exists(Path.of(filePath)));
     }

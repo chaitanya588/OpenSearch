@@ -24,6 +24,7 @@ import org.opensearch.index.codec.CodecService;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineConfigFactory;
 import org.opensearch.index.engine.dataformat.FileInfos;
+import org.opensearch.index.engine.dataformat.FlushInput;
 import org.opensearch.index.engine.dataformat.RefreshInput;
 import org.opensearch.index.engine.dataformat.RefreshResult;
 import org.opensearch.index.engine.exec.Segment;
@@ -175,7 +176,7 @@ public class LuceneIndexingExecutionEngineTests extends OpenSearchTestCase {
                 luceneWriter.addDoc(input);
             }
 
-            FileInfos fileInfos = luceneWriter.flush();
+            FileInfos fileInfos = luceneWriter.flush(FlushInput.EMPTY);
             WriterFileSet wfs = fileInfos.getWriterFileSet(luceneDataFormat).get();
 
             // Build a Segment from the FileInfos
@@ -282,7 +283,7 @@ public class LuceneIndexingExecutionEngineTests extends OpenSearchTestCase {
                 writer.addDoc(input);
             }
 
-            FileInfos fileInfos = writer.flush();
+            FileInfos fileInfos = writer.flush(FlushInput.EMPTY);
             WriterFileSet wfs = fileInfos.getWriterFileSet(luceneDataFormat).get();
 
             // Build segment and refresh
@@ -337,7 +338,7 @@ public class LuceneIndexingExecutionEngineTests extends OpenSearchTestCase {
                 input.setRowId(LuceneDocumentInput.ROW_ID_FIELD, i);
                 writer1.addDoc(input);
             }
-            FileInfos fileInfos1 = writer1.flush();
+            FileInfos fileInfos1 = writer1.flush(FlushInput.EMPTY);
 
             for (int i = 0; i < numDocs2; i++) {
                 LuceneDocumentInput input = engine.newDocumentInput();
@@ -345,7 +346,7 @@ public class LuceneIndexingExecutionEngineTests extends OpenSearchTestCase {
                 input.setRowId(LuceneDocumentInput.ROW_ID_FIELD, i);
                 writer2.addDoc(input);
             }
-            FileInfos fileInfos2 = writer2.flush();
+            FileInfos fileInfos2 = writer2.flush(FlushInput.EMPTY);
 
             // Build segments and refresh with both
             WriterFileSet wfs1 = fileInfos1.getWriterFileSet(luceneDataFormat).get();
