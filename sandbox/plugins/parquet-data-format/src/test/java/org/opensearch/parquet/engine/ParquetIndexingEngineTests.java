@@ -16,6 +16,7 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.FileInfos;
+import org.opensearch.index.engine.dataformat.FlushInput;
 import org.opensearch.index.engine.dataformat.RefreshInput;
 import org.opensearch.index.engine.dataformat.RefreshResult;
 import org.opensearch.index.engine.dataformat.Writer;
@@ -94,7 +95,7 @@ public class ParquetIndexingEngineTests extends OpenSearchTestCase {
             doc.close();
         }
 
-        writer.flush();
+        writer.flush(FlushInput.EMPTY);
         String expectedFile = getExpectedParquetPath(1L);
         assertTrue(Files.exists(Path.of(expectedFile)));
         assertEquals(5, RustBridge.getFileMetadata(expectedFile).numRows());
@@ -109,7 +110,7 @@ public class ParquetIndexingEngineTests extends OpenSearchTestCase {
             doc.addField(scoreField, gen * 100);
             writer.addDoc(doc);
             doc.close();
-            writer.flush();
+            writer.flush(FlushInput.EMPTY);
             assertEquals(1, RustBridge.getFileMetadata(getExpectedParquetPath(gen)).numRows());
         }
     }
@@ -162,7 +163,7 @@ public class ParquetIndexingEngineTests extends OpenSearchTestCase {
 
     public void testFlushWithNoDocumentsReturnsEmpty() throws Exception {
         Writer<ParquetDocumentInput> writer = engine.createWriter(new WriterConfig(1L));
-        assertEquals(FileInfos.empty(), writer.flush());
+        assertEquals(FileInfos.empty(), writer.flush(FlushInput.EMPTY));
     }
 
     private ParquetIndexingEngine createEngine() {
