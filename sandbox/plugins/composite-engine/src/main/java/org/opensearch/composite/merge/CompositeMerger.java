@@ -96,10 +96,12 @@ public class CompositeMerger implements Merger {
 
         for (IndexingExecutionEngine<?, ?> secondary : engine.getSecondaryDelegates()) {
             Merger merger = secondary.getMerger();
-            if (merger == null) {
-                throw new IllegalStateException("Secondary format [" + secondary.getDataFormat().name() + "] does not provide a Merger");
+            if (merger != null) {
+                map.put(secondary.getDataFormat(), merger);
             }
-            map.put(secondary.getDataFormat(), merger);
+            // Secondary formats without a Merger (e.g., Lucene) are skipped —
+            // they receive row ID mappings from the primary during composite merge
+            // and don't need their own independent merge logic.
         }
         return Map.copyOf(map);
     }

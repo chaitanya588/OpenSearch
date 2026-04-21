@@ -64,6 +64,10 @@ lazy_static! {
     pub static ref SETTINGS_STORE: DashMap<String, NativeSettings> = DashMap::new();
     /// Holds file handles for finalized files pending fsync. Removed after sync.
     static ref FILE_MANAGER: DashMap<String, File> = DashMap::new();
+    /// Caches the sort permutation produced during sort-on-close.
+    /// Key is the final output filename. Each entry is a Vec of (old_row_id, new_row_id).
+    /// Retrieved by Java via `parquet_get_sort_permutation` FFM call (single-use: removed after retrieval).
+    pub static ref SORT_PERMUTATION: DashMap<String, Vec<(i64, i64)>> = DashMap::new();
 }
 
 pub struct NativeParquetWriter;
@@ -299,6 +303,8 @@ impl NativeParquetWriter {
         }
     }
 
+
+    /// In-memory sort for small files: read all batches, concat, sort, rewrite row IDs, write.
     fn sort_small_file(
         temp_filename: &str,
         output_filename: &str,
@@ -334,9 +340,15 @@ impl NativeParquetWriter {
 
         let combined_batch = concat_batches(&schema, &all_batches)?;
         let sorted_batch = Self::sort_batch(&combined_batch, sort_columns, reverse_sorts, nulls_first)?;
-        let final_batch = Self::rewrite_row_ids(&sorted_batch, &schema)?;
+        let (final_batch, permutation) = Self::rewrite_row_ids(&sorted_batch, &schema)?;
 
         let crc32 = Self::write_final_file(output_filename, index_name, &final_batch, schema)?;
+
+        // Cache the sort permutation for Java to retrieve
+        if !permutation.is_empty() {
+            log_info!("sort_small_file: caching {} permutation entries for {}", permutation.len(), output_filename);
+            SORT_PERMUTATION.insert(output_filename.to_string(), permutation);
+        }
 
         log_info!(
             "sort_small_file: sorted {} rows, wrote Parquet to {}",
@@ -476,23 +488,49 @@ impl NativeParquetWriter {
         Ok(RecordBatch::try_new(batch.schema(), sorted_columns?)?)
     }
 
-    /// If a __row_id__ column exists, rewrite it with sequential values 0..N.
+    /// If a ___row_id column exists, rewrite it with sequential values 0..N.
+    /// Also returns the sort permutation as Vec<(old_row_id, new_row_id)>.
     fn rewrite_row_ids(
         batch: &RecordBatch,
         schema: &Arc<arrow::datatypes::Schema>,
-    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+    ) -> Result<(RecordBatch, Vec<(i64, i64)>), Box<dyn std::error::Error>> {
         use arrow::array::Int64Array;
 
+        // Log all column names present in the schema
+        let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        log_info!("[RUST] rewrite_row_ids: schema has {} columns: {:?}", column_names.len(), column_names);
+        log_info!("[RUST] rewrite_row_ids: looking for ROW_ID_COLUMN_NAME = '{}'", ROW_ID_COLUMN_NAME);
+        log_info!("[RUST] rewrite_row_ids: batch num_rows = {}, num_columns = {}", batch.num_rows(), batch.num_columns());
+
         if let Some(row_id_idx) = schema.fields().iter().position(|f| f.name() == ROW_ID_COLUMN_NAME) {
-            log_debug!("Rewriting __row_id__ column with sequential values 0..{}", batch.num_rows());
+            log_info!("rewrite_row_ids: FOUND ___row_id at column index {}", row_id_idx);
+            log_debug!("rewrite_row_ids: rewriting ___row_id with sequential values 0..{}", batch.num_rows());
+
+            // Capture the sort permutation: old_row_id (from sorted batch) → new_row_id (sequential position)
+            let old_row_ids = batch.column(row_id_idx)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or("___row_id column is not Int64")?;
+
+            let mut permutation = Vec::with_capacity(batch.num_rows());
+            for new_pos in 0..batch.num_rows() {
+                let old_row_id = old_row_ids.value(new_pos);
+                permutation.push((old_row_id, new_pos as i64));
+            }
+
+            log_debug!("rewrite_row_ids: captured {} permutation entries", permutation.len());
+
             let sequential_ids = Int64Array::from_iter_values(
                 (0..batch.num_rows() as u64).map(|x| x as i64)
             );
             let mut new_columns = batch.columns().to_vec();
             new_columns[row_id_idx] = Arc::new(sequential_ids);
-            Ok(RecordBatch::try_new(schema.clone(), new_columns)?)
+            log_info!("[RUST] rewrite_row_ids: successfully rewrote ___row_id with sequential 0..{}", batch.num_rows());
+            Ok((RecordBatch::try_new(schema.clone(), new_columns)?, permutation))
         } else {
-            Ok(batch.clone())
+            log_info!("[RUST] rewrite_row_ids: ___row_id column NOT FOUND in schema — returning empty permutation");
+            log_info!("[RUST] rewrite_row_ids: available columns are: {:?}", column_names);
+            Ok((batch.clone(), Vec::new()))
         }
     }
 

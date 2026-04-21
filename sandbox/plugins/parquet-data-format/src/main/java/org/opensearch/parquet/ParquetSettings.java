@@ -28,6 +28,13 @@ public final class ParquetSettings {
     /** Group setting prefix for all Parquet settings. */
     public static final Setting<Settings> PARQUET_SETTINGS = Setting.groupSetting("index.parquet.", Setting.Property.IndexScope);
 
+    /** Maximum row group size in bytes (default 128MB). */
+    public static final Setting<ByteSizeValue> ROW_GROUP_SIZE_BYTES = Setting.byteSizeSetting(
+        "index.parquet.row_group_size_bytes",
+        new ByteSizeValue(128, ByteSizeUnit.MB),
+        Setting.Property.IndexScope
+    );
+
     /** Data page size limit in bytes (default 1MB). */
     public static final Setting<ByteSizeValue> PAGE_SIZE_BYTES = Setting.byteSizeSetting(
         "index.parquet.page_size_bytes",
