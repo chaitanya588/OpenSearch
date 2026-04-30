@@ -20,6 +20,7 @@ use super::cursor::FileCursor;
 use super::heap::{cmp_sort_values, get_sort_values, HeapItem};
 use super::io_task::{get_merge_pool, BATCH_SIZE, OUTPUT_FLUSH_ROWS};
 use super::schema::ColumnMapping;
+use super::stats::MergeStats;
 
 /// Performs a streaming k-way merge with an explicit sort direction per column.
 pub fn merge_sorted(
@@ -213,4 +214,171 @@ pub fn merge_sorted(
     );
 
     Ok(())
+}
+
+/// Same as `merge_sorted` but returns detailed comparison statistics.
+#[cfg(feature = "test-utils")]
+pub fn merge_sorted_with_stats(
+    input_files: &[String],
+    output_path: &str,
+    index_name: &str,
+    sort_columns: &[String],
+    reverse_sorts: &[bool],
+    nulls_first: &[bool],
+) -> super::MergeResult<MergeStats> {
+    let batch_size = BATCH_SIZE;
+    let output_flush_rows = OUTPUT_FLUSH_ROWS;
+    let mut stats = MergeStats::default();
+
+    if input_files.is_empty() {
+        return Ok(stats);
+    }
+
+    if sort_columns.is_empty() {
+        return Err(super::MergeError::Logic(
+            "merge_sorted_with_stats called with empty sort_columns".into(),
+        ));
+    }
+
+    // ── Phase 1: Initialize cursors and collect schemas ─────────────────
+    let mut cursors: Vec<FileCursor> = Vec::with_capacity(input_files.len());
+    let mut arrow_schemas: Vec<ArrowSchema> = Vec::with_capacity(input_files.len());
+    let mut parquet_descriptors: Vec<SchemaDescriptor> = Vec::with_capacity(input_files.len());
+
+    for (file_id, path) in input_files.iter().enumerate() {
+        let (cursor, projected_schema, parquet_descr) =
+            FileCursor::new(path, file_id, sort_columns, nulls_first, batch_size)?;
+        cursors.push(cursor);
+        arrow_schemas.push(projected_schema.as_ref().clone());
+        parquet_descriptors.push(parquet_descr);
+    }
+
+    // ── Phase 2: Create MergeContext ────────────────────────────────────
+    let mut ctx = MergeContext::new(
+        arrow_schemas.clone(),
+        &parquet_descriptors,
+        output_path,
+        index_name,
+        output_flush_rows,
+    )?;
+
+    let col_mappings: Vec<ColumnMapping> = arrow_schemas.iter()
+        .map(|s| ColumnMapping::new(s, ctx.data_schema()))
+        .collect();
+
+    // ── Phase 3: Seed the heap ──────────────────────────────────────────
+    let reverse_sorts_arc = Arc::new(reverse_sorts.to_vec());
+    let mut heap: BinaryHeap<HeapItem> = BinaryHeap::with_capacity(cursors.len());
+    for cursor in &cursors {
+        let sv = cursor.current_sort_values()?;
+        heap.push(HeapItem {
+            sort_values: sv,
+            file_id: cursor.file_id,
+            reverse_sorts: Arc::clone(&reverse_sorts_arc),
+        });
+        stats.heap_pushes += 1;
+    }
+
+    // ── Phase 4: K-way merge loop with stats ────────────────────────────
+    while let Some(item) = heap.pop() {
+        stats.heap_pops += 1;
+        let file_id = item.file_id;
+
+        // TIER 1: Single cursor remaining — drain it
+        if heap.is_empty() {
+            let cursor = &mut cursors[file_id];
+            let mapping = &col_mappings[file_id];
+            loop {
+                let remaining = cursor.batch_height() - cursor.row_idx;
+                if remaining > 0 {
+                    stats.tier1_rows += remaining as u64;
+                    let slice = cursor.take_slice(cursor.row_idx, remaining);
+                    ctx.push_batch(mapping.pad_batch(&slice)?)?;
+                }
+                if !cursor.advance_past_batch()? {
+                    break;
+                }
+            }
+            break;
+        }
+
+        // TIER 2 & 3: Multiple cursors active
+        let cursor = &mut cursors[file_id];
+        let mapping = &col_mappings[file_id];
+
+        loop {
+            let heap_top = &heap.peek().unwrap().sort_values;
+
+            // TIER 2: Entire remaining batch fits before heap top
+            let last_val = cursor.last_sort_values()?;
+            stats.tier2_skips += 1; // one comparison for the tier 2 check
+            if cmp_sort_values(&last_val, heap_top, reverse_sorts) != Ordering::Greater {
+                let remaining = cursor.batch_height() - cursor.row_idx;
+                stats.tier2_rows += remaining as u64;
+                let slice = cursor.take_slice(cursor.row_idx, remaining);
+                ctx.push_batch(mapping.pad_batch(&slice)?)?;
+
+                if !cursor.advance_past_batch()? {
+                    break;
+                }
+                continue;
+            }
+
+            // TIER 3: Binary search for the exact boundary
+            stats.tier3_searches += 1;
+            let run_start = cursor.row_idx;
+            let batch_h = cursor.batch_height();
+            let batch = cursor.current_batch.as_ref().unwrap();
+
+            let mut lo = run_start;
+            let mut hi = batch_h - 1;
+
+            while lo + 1 < hi {
+                let mid = lo + (hi - lo) / 2;
+                let mid_val = get_sort_values(
+                    batch,
+                    mid,
+                    &cursor.sort_col_indices,
+                    &cursor.sort_col_types,
+                    &cursor.nulls_first,
+                )?;
+
+                stats.tier3_comparisons += 1;
+                if cmp_sort_values(&mid_val, heap_top, reverse_sorts) != Ordering::Greater {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let run_end = lo;
+
+            let run_len = run_end - run_start + 1;
+            if run_len > 0 {
+                stats.tier3_rows += run_len as u64;
+                let slice = cursor.take_slice(run_start, run_len);
+                ctx.push_batch(mapping.pad_batch(&slice)?)?;
+            }
+
+            cursor.row_idx = run_end;
+            if !cursor.advance()? {
+                break;
+            }
+
+            let next_val = cursor.current_sort_values()?;
+            if cmp_sort_values(&next_val, heap_top, reverse_sorts) == Ordering::Greater {
+                stats.heap_pushes += 1;
+                heap.push(HeapItem {
+                    sort_values: next_val,
+                    file_id,
+                    reverse_sorts: Arc::clone(&reverse_sorts_arc),
+                });
+                break;
+            }
+        }
+    }
+
+    // ── Phase 5: Close ──────────────────────────────────────────────────
+    ctx.finish()?;
+
+    Ok(stats)
 }

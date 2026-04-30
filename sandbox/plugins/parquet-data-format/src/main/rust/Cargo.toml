@@ -23,6 +23,7 @@ native-bridge-common = { workspace = true }
 rayon = { workspace = true }
 tokio = { workspace = true }
 crc32fast = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 opensearch-parquet-format = { path = ".", features = ["test-utils"] }
@@ -31,4 +32,8 @@ opensearch-parquet-format = { path = ".", features = ["test-utils"] }
 name = "sort_bench"
 path = "src/bin/sort_bench.rs"
 required-features = ["test-utils"]
+
+[[bin]]
+name = "parquet_to_ipc"
+path = "src/bin/parquet_to_ipc.rs"
 

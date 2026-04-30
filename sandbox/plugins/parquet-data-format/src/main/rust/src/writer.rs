@@ -548,7 +548,19 @@ impl NativeParquetWriter {
 
         let rows = converter.convert_columns(&sort_arrays)?;
         let mut sort_indices: Vec<u32> = (0..batch.num_rows() as u32).collect();
-        sort_indices.sort_unstable_by(|&a, &b| rows.row(a as usize).cmp(&rows.row(b as usize)));
+
+        #[cfg(feature = "test-utils")]
+        {
+            use crate::merge::stats::increment_sort_comparisons;
+            sort_indices.sort_unstable_by(|&a, &b| {
+                increment_sort_comparisons();
+                rows.row(a as usize).cmp(&rows.row(b as usize))
+            });
+        }
+        #[cfg(not(feature = "test-utils"))]
+        {
+            sort_indices.sort_unstable_by(|&a, &b| rows.row(a as usize).cmp(&rows.row(b as usize)));
+        }
 
         let indices = arrow::array::UInt32Array::from(sort_indices);
         let sorted_columns: Result<Vec<_>, _> = batch
@@ -659,5 +671,108 @@ impl NativeParquetWriter {
             batch_size,
             use_row_conversion,
         )
+    }
+
+    /// Like bench_sort_large_file but returns detailed comparison statistics.
+    #[cfg(feature = "test-utils")]
+    pub fn bench_sort_large_file_with_stats(
+        ipc_path: &str,
+        output_filename: &str,
+        index_name: &str,
+        sort_columns: &[String],
+        reverse_sorts: &[bool],
+        nulls_first: &[bool],
+        batch_size: usize,
+        use_row_conversion: bool,
+    ) -> Result<crate::merge::stats::SortStats, Box<dyn std::error::Error>> {
+        use crate::merge::stats::{reset_sort_comparisons, get_sort_comparisons, SortStats};
+        use crate::merge::merge_sorted_with_stats;
+
+        log_debug!("bench_sort_large_file_with_stats: {} (row_conversion={})", ipc_path, use_row_conversion);
+
+        let file = File::open(ipc_path)?;
+        let reader = IpcFileReader::try_new(file, None)?;
+        let schema = reader.schema();
+
+        let mut chunk_paths: Vec<String> = Vec::new();
+        let mut batch_count: u64 = 0;
+        let temp_dir = std::env::temp_dir();
+
+        // Reset comparison counter before chunk sorting
+        reset_sort_comparisons();
+
+        for batch_result in reader {
+            let batch = batch_result?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+
+            let mut offset = 0;
+            while offset < batch.num_rows() {
+                let len = std::cmp::min(batch_size, batch.num_rows() - offset);
+                let slice = batch.slice(offset, len);
+                offset += len;
+
+                let sorted_batch = if use_row_conversion {
+                    Self::sort_batch_row_conversion(&slice, sort_columns, reverse_sorts, nulls_first)?
+                } else {
+                    Self::sort_batch(&slice, sort_columns, reverse_sorts, nulls_first)?
+                };
+
+                let chunk_filename = temp_dir
+                    .join(format!(
+                        "sort_chunk_{}_{}.parquet",
+                        batch_count,
+                        std::process::id()
+                    ))
+                    .to_string_lossy()
+                    .to_string();
+                Self::write_final_file(&chunk_filename, index_name, &sorted_batch, schema.clone())?;
+
+                chunk_paths.push(chunk_filename);
+                batch_count += 1;
+            }
+        }
+
+        let chunk_sort_comparisons = get_sort_comparisons();
+
+        if chunk_paths.is_empty() {
+            let props = WriterPropertiesBuilder::build(
+                &SETTINGS_STORE.get(index_name).map(|r| r.clone()).unwrap_or_default(),
+            );
+            let file = File::create(output_filename)?;
+            let writer = ArrowWriter::try_new(file, schema, Some(props))?;
+            writer.close()?;
+            return Ok(SortStats::default());
+        }
+
+        // Measure total chunk file sizes before merge consumes them
+        let chunk_total_bytes: u64 = chunk_paths.iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+
+        let merge_stats = merge_sorted_with_stats(
+            &chunk_paths,
+            output_filename,
+            index_name,
+            sort_columns,
+            reverse_sorts,
+            nulls_first,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            format!("Streaming merge failed: {}", e).into()
+        })?;
+
+        for path in &chunk_paths {
+            let _ = std::fs::remove_file(path);
+        }
+
+        Ok(SortStats {
+            chunk_sort_comparisons,
+            chunk_count: batch_count,
+            chunk_total_bytes,
+            merge: merge_stats,
+        })
     }
 }

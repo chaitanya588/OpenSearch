@@ -13,8 +13,11 @@ pub mod heap;
 pub mod io_task;
 pub mod schema;
 mod sorted;
+pub mod stats;
 mod unsorted;
 
 pub use error::{MergeError, MergeResult};
 pub use sorted::merge_sorted;
+#[cfg(feature = "test-utils")]
+pub use sorted::merge_sorted_with_stats;
 pub use unsorted::merge_unsorted;
