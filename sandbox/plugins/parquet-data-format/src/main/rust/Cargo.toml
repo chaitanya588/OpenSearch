@@ -27,3 +27,8 @@ crc32fast = { workspace = true }
 [dev-dependencies]
 opensearch-parquet-format = { path = ".", features = ["test-utils"] }
 
+[[bin]]
+name = "sort_bench"
+path = "src/bin/sort_bench.rs"
+required-features = ["test-utils"]
+

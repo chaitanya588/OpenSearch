@@ -9,6 +9,7 @@
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use arrow::compute::{concat_batches, lexsort_to_indices, take, SortColumn};
+use arrow::row::{RowConverter, SortField};
 use arrow_ipc::writer::FileWriter as IpcFileWriter;
 use arrow_ipc::reader::FileReader as IpcFileReader;
 use dashmap::DashMap;
@@ -33,15 +34,15 @@ pub struct FinalizeResult {
 }
 
 /// The underlying writer — either direct Parquet or Arrow IPC staging.
-/// When sort columns are configured, the IPC variant is used to avoid the
-/// redundant Parquet encode→decode cycle before sorting. Arrow IPC is
-/// essentially a memory dump of Arrow batches — near-zero serialization cost.
+/// When sort columns are configured, the IPC variant is used so that
+/// batches can be cheaply read back for sorting — Arrow IPC is a raw
+/// dump of in-memory Arrow buffers with minimal framing overhead.
 enum WriterVariant {
     /// Direct Parquet writer — used when no sort columns are configured.
     Parquet(Arc<Mutex<ArrowWriter<File>>>),
     /// Arrow IPC staging writer — used when sort columns are configured.
     /// Batches are written as raw Arrow IPC; on close they are read back,
-    /// sorted, and written as a single Parquet file.
+    /// sorted, and written as a final Parquet file.
     Ipc(Arc<Mutex<IpcFileWriter<File>>>),
 }
 
@@ -123,8 +124,8 @@ impl NativeParquetWriter {
 
         SETTINGS_STORE.insert(index_name, settings.clone());
 
-        // If sort columns are configured, use Arrow IPC staging path to avoid
-        // the redundant Parquet encode→decode cycle before sorting.
+        // If sort columns are configured, use Arrow IPC staging path so
+        // batches can be cheaply read back for sorting before writing Parquet.
         let (variant, file_clone) = if !settings.sort_columns.is_empty() {
             let ipc_path = format!("{}{}", temp_filename, IPC_STAGING_SUFFIX);
             let file = File::create(&ipc_path)?;
@@ -322,7 +323,7 @@ impl NativeParquetWriter {
         if file_size <= config.get_sort_in_memory_threshold_bytes() {
             Self::sort_small_file(temp_filename, output_filename, index_name, sort_columns, reverse_sorts, nulls_first)
         } else {
-            Self::sort_large_file(temp_filename, output_filename, index_name, sort_columns, reverse_sorts, nulls_first, config.get_sort_batch_size())
+            Self::sort_large_file(temp_filename, output_filename, index_name, sort_columns, reverse_sorts, nulls_first, config.get_sort_batch_size(), false)
         }
     }
 
@@ -378,6 +379,8 @@ impl NativeParquetWriter {
     /// For large files: read batches, slice each to `batch_size` rows,
     /// sort each slice individually, write it as a Parquet chunk file, then
     /// use the streaming k-way merge to produce the final globally-sorted output.
+    /// When `use_row_conversion` is true, uses RowConverter-based sorting
+    /// instead of lexsort_to_indices for A/B perf comparison.
     fn sort_large_file(
         temp_filename: &str,
         output_filename: &str,
@@ -386,8 +389,9 @@ impl NativeParquetWriter {
         reverse_sorts: &[bool],
         nulls_first: &[bool],
         batch_size: usize,
+        use_row_conversion: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        log_debug!("Using streaming merge sort for large file: {}", temp_filename);
+        log_debug!("Using streaming merge sort for large file: {} (row_conversion={})", temp_filename, use_row_conversion);
 
         let file = File::open(temp_filename)?;
         let reader = IpcFileReader::try_new(file, None)?;
@@ -411,7 +415,11 @@ impl NativeParquetWriter {
                 let slice = batch.slice(offset, len);
                 offset += len;
 
-                let sorted_batch = Self::sort_batch(&slice, sort_columns, reverse_sorts, nulls_first)?;
+                let sorted_batch = if use_row_conversion {
+                    Self::sort_batch_row_conversion(&slice, sort_columns, reverse_sorts, nulls_first)?
+                } else {
+                    Self::sort_batch(&slice, sort_columns, reverse_sorts, nulls_first)?
+                };
 
                 let chunk_filename = temp_dir
                     .join(format!(
@@ -504,6 +512,54 @@ impl NativeParquetWriter {
         Ok(RecordBatch::try_new(batch.schema(), sorted_columns?)?)
     }
 
+    /// Alternative sort using RowConverter for A/B perf comparison.
+    /// Converts sort columns into compact byte-comparable rows, sorts
+    /// indices by comparing those rows, then reorders all columns via take.
+    fn sort_batch_row_conversion(
+        batch: &RecordBatch,
+        sort_columns: &[String],
+        reverse_sorts: &[bool],
+        nulls_first: &[bool],
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        let sort_fields: Vec<SortField> = sort_columns
+            .iter()
+            .enumerate()
+            .map(|(i, col_name)| {
+                let col_index = batch.schema().index_of(col_name)
+                    .map_err(|_| format!("Sort column '{}' not found in schema", col_name))?;
+                let data_type = batch.schema().field(col_index).data_type().clone();
+                let options = arrow::compute::SortOptions {
+                    descending: reverse_sorts.get(i).copied().unwrap_or(false),
+                    nulls_first: nulls_first.get(i).copied().unwrap_or(false),
+                };
+                Ok(SortField::new_with_options(data_type, options))
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+
+        let converter = RowConverter::new(sort_fields)?;
+
+        let sort_arrays: Vec<Arc<dyn arrow::array::Array>> = sort_columns
+            .iter()
+            .map(|col_name| {
+                let col_index = batch.schema().index_of(col_name).unwrap();
+                batch.column(col_index).clone()
+            })
+            .collect();
+
+        let rows = converter.convert_columns(&sort_arrays)?;
+        let mut sort_indices: Vec<u32> = (0..batch.num_rows() as u32).collect();
+        sort_indices.sort_unstable_by(|&a, &b| rows.row(a as usize).cmp(&rows.row(b as usize)));
+
+        let indices = arrow::array::UInt32Array::from(sort_indices);
+        let sorted_columns: Result<Vec<_>, _> = batch
+            .columns()
+            .iter()
+            .map(|col| take(col.as_ref(), &indices, None))
+            .collect();
+
+        Ok(RecordBatch::try_new(batch.schema(), sorted_columns?)?)
+    }
+
     /// If a ___row_id column exists, rewrite it with sequential values 0..N.
     fn rewrite_row_ids(
         batch: &RecordBatch,
@@ -578,5 +634,30 @@ impl NativeParquetWriter {
         let file_metadata = reader.metadata().file_metadata().clone();
         log_debug!("Metadata for {}: version={}, num_rows={}", filename, file_metadata.version(), file_metadata.num_rows());
         Ok(file_metadata)
+    }
+
+    /// Public entry point for benchmarking sort_large_file with A/B flag.
+    /// Only available under the `test-utils` feature.
+    #[cfg(feature = "test-utils")]
+    pub fn bench_sort_large_file(
+        ipc_path: &str,
+        output_filename: &str,
+        index_name: &str,
+        sort_columns: &[String],
+        reverse_sorts: &[bool],
+        nulls_first: &[bool],
+        batch_size: usize,
+        use_row_conversion: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        Self::sort_large_file(
+            ipc_path,
+            output_filename,
+            index_name,
+            sort_columns,
+            reverse_sorts,
+            nulls_first,
+            batch_size,
+            use_row_conversion,
+        )
     }
 }
