@@ -17,6 +17,7 @@
 //! Options:
 //!   --file <PATH>           Parquet file to benchmark (required)
 //!   --sort-cols <NAMES>     Comma-separated sort column names (required)
+//!   --reverse-sorts <VALS>  Comma-separated true/false per sort col (default: all false)
 //!   --ipc-batch-size <N>    Batch size for Parquet->IPC conversion (default: 8192)
 //!   --sort-batch-size <N>   Batch size for sort chunks in NativeWriter (default: 8192)
 //!   --iters <N>             Iterations per variant (default: 3)
@@ -293,6 +294,7 @@ fn main() {
         eprintln!("Usage: sort_bench --file <PARQUET_PATH> --sort-cols <COL1,COL2,...> [OPTIONS]");
         eprintln!("  --file <PATH>           Parquet file to benchmark (required)");
         eprintln!("  --sort-cols <NAMES>     Comma-separated sort column names (required)");
+        eprintln!("  --reverse-sorts <VALS> Comma-separated true/false per sort col (default: all false)");
         eprintln!("  --ipc-batch-size <N>    Batch size for Parquet->IPC conversion (default: 8192)");
         eprintln!("  --sort-batch-size <N>   Batch size for sort chunks in NativeWriter (default: 8192)");
         eprintln!("  --iters <N>             Iterations per variant (default: 3)");
@@ -317,7 +319,25 @@ fn main() {
 
     let sort_columns: Vec<String> = sort_cols_str.split(',').map(|s| s.trim().to_string()).collect();
     let num_sort_cols = sort_columns.len();
-    let reverse_sorts: Vec<bool> = vec![false; num_sort_cols];
+
+    let reverse_sorts_str = parse_arg(&args, "--reverse-sorts", "");
+    let reverse_sorts: Vec<bool> = if reverse_sorts_str.is_empty() {
+        vec![false; num_sort_cols]
+    } else {
+        let parsed: Vec<bool> = reverse_sorts_str
+            .split(',')
+            .map(|s| s.trim().eq_ignore_ascii_case("true"))
+            .collect();
+        if parsed.len() != num_sort_cols {
+            eprintln!(
+                "Error: --reverse-sorts has {} values but --sort-cols has {} columns",
+                parsed.len(),
+                num_sort_cols
+            );
+            std::process::exit(1);
+        }
+        parsed
+    };
     let nulls_first: Vec<bool> = vec![false; num_sort_cols];
 
     let parquet_path = Path::new(&parquet_file);
@@ -336,6 +356,7 @@ fn main() {
     eprintln!("\n=== Sort Benchmark ===");
     eprintln!("  input:           {} ({})", parquet_file, fmt_bytes(input_size));
     eprintln!("  sort_cols:       {:?}", sort_columns);
+    eprintln!("  reverse_sorts:   {:?}", reverse_sorts);
     eprintln!("  ipc_batch_size:  {}", ipc_batch_size);
     eprintln!("  sort_batch_size: {}", sort_batch_size);
     eprintln!("  iters:           {}", iters);
