@@ -77,15 +77,12 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
     /** Large RAM buffer to avoid intermediate segment flushes within a single writer. */
     private static final double RAM_BUFFER_SIZE_MB = 256.0;
 
-    private static final String ROW_ID = LuceneDocumentInput.ROW_ID_FIELD;
-
     private final long writerGeneration;
     private final LuceneDataFormat dataFormat;
     private final Path tempDirectory;
     private final Directory directory;
     private final IndexWriter indexWriter;
     private final ReentrantLock lock;
-    private final Codec codec;
     private volatile long docCount;
 
     /**
@@ -111,7 +108,6 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         this.dataFormat = dataFormat;
         this.lock = new ReentrantLock();
         this.docCount = 0;
-        this.codec = codec;
 
         // Create an isolated temp directory for this writer's segment
         this.tempDirectory = baseDirectory.resolve("lucene_gen_" + writerGeneration);
@@ -206,6 +202,7 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
             .writerGeneration(writerGeneration)
             .addNumRows(docCount);
 
+        // Add all files in the segment
         for (String file : directory.listAll()) {
             if (file.startsWith("segments") == false && file.equals("write.lock") == false) {
                 wfsBuilder.addFile(file);
@@ -215,6 +212,7 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         // Since flush is once only, we can close the write post this.
         indexWriter.close();
         directory.close();
+
         return FileInfos.builder().putWriterFileSet(dataFormat, wfsBuilder.build()).build();
     }
 
