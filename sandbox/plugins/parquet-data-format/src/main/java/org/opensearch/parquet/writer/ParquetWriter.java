@@ -10,6 +10,7 @@ package org.opensearch.parquet.writer;
 
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.engine.dataformat.ArrayRowIdMapping;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.FlushInput;
 import org.opensearch.index.engine.dataformat.WriteResult;
@@ -111,7 +112,7 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
             .build();
         return FileInfos.builder()
             .putWriterFileSet(dataFormat, writerFileSet)
-            .sortPermutation(vsrManager.getSortPermutation())
+            .sortPermutation(ArrayRowIdMapping.fromRawPermutation(vsrManager.getSortPermutation()))
             .build();
     }
 

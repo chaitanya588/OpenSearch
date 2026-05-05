@@ -17,6 +17,7 @@ import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.FlushInput;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
+import org.opensearch.index.engine.dataformat.RowIdMapping;
 import org.opensearch.index.engine.dataformat.WriteResult;
 import org.opensearch.index.engine.dataformat.Writer;
 import org.opensearch.index.engine.exec.WriterFileSet;
@@ -153,7 +154,7 @@ class CompositeWriter implements Writer<CompositeDocumentInput>, Lockable {
         primaryWfs.ifPresent(writerFileSet -> builder.putWriterFileSet(primaryFormat, writerFileSet));
 
         // Capture the sort permutation from the primary flush
-        long[][] sortPermutation = primaryFileInfos.sortPermutation();
+        RowIdMapping sortPermutation = primaryFileInfos.sortPermutation();
         if (sortPermutation != null) {
             builder.sortPermutation(sortPermutation);
         }

@@ -47,6 +47,7 @@ import java.util.Objects;
 public final class PackedRowIdMapping implements RowIdMapping {
 
     private final PackedLongValues mapping;
+    private final PackedLongValues reverseMapping;
     private final Map<Long, Integer> generationOffsets;
     private final Map<Long, Integer> generationSizes;
 
@@ -67,6 +68,21 @@ public final class PackedRowIdMapping implements RowIdMapping {
             builder.add(value);
         }
         this.mapping = builder.build();
+
+        // Build reverse mapping (newRowId -> oldPosition) for newToOld lookups
+        long[] reverseArray = new long[mappingArray.length];
+        for (int i = 0; i < mappingArray.length; i++) {
+            int newPos = (int) mappingArray[i];
+            if (newPos >= 0 && newPos < reverseArray.length) {
+                reverseArray[newPos] = i;
+            }
+        }
+        PackedLongValues.Builder reverseBuilder = PackedLongValues.packedBuilder(PackedInts.DEFAULT);
+        for (long value : reverseArray) {
+            reverseBuilder.add(value);
+        }
+        this.reverseMapping = reverseBuilder.build();
+
         this.generationOffsets = Collections.unmodifiableMap(new HashMap<>(generationOffsets));
         this.generationSizes = Collections.unmodifiableMap(new HashMap<>(generationSizes));
     }
@@ -103,11 +119,28 @@ public final class PackedRowIdMapping implements RowIdMapping {
         return size != null ? size : 0;
     }
 
+    @Override
+    public int oldToNew(int oldDocId) {
+        if (oldDocId < 0 || oldDocId >= mapping.size()) {
+            return oldDocId;
+        }
+        return (int) mapping.get(oldDocId);
+    }
+
+    @Override
+    public int newToOld(int newDocId) {
+        if (newDocId < 0 || newDocId >= reverseMapping.size()) {
+            return newDocId;
+        }
+        return (int) reverseMapping.get(newDocId);
+    }
+
     /**
      * Returns the total number of entries in the mapping.
      *
      * @return the total mapping size
      */
+    @Override
     public int size() {
         return (int) mapping.size();
     }

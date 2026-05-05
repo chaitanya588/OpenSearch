@@ -8,10 +8,12 @@
 
 package org.opensearch.composite;
 
+import org.opensearch.index.engine.dataformat.ArrayRowIdMapping;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.FlushInput;
+import org.opensearch.index.engine.dataformat.RowIdMapping;
 import org.opensearch.index.engine.dataformat.WriteResult;
 import org.opensearch.index.engine.dataformat.Writer;
 import org.opensearch.index.engine.exec.WriterFileSet;
@@ -54,12 +56,16 @@ public class CompositeWriterSortPropagationTests extends OpenSearchTestCase {
         // The secondary writer should have received the sort permutation
         assertNotNull("Secondary writer should have received FlushInput", secondaryWriter.lastFlushInput);
         assertTrue("FlushInput should have sort permutation", secondaryWriter.lastFlushInput.hasSortPermutation());
-        assertArrayEquals(permutation[0], secondaryWriter.lastFlushInput.sortPermutation()[0]);
-        assertArrayEquals(permutation[1], secondaryWriter.lastFlushInput.sortPermutation()[1]);
+        RowIdMapping receivedMapping = secondaryWriter.lastFlushInput.sortPermutation();
+        assertNotNull(receivedMapping);
+        assertEquals(3, receivedMapping.size());
+        // permutation is {0,1,2} -> {2,0,1}: old pos 0 maps to new pos 2
+        assertEquals(2, receivedMapping.oldToNew(0));
+        assertEquals(0, receivedMapping.oldToNew(1));
+        assertEquals(1, receivedMapping.oldToNew(2));
 
         // The composite FileInfos should also carry the sort permutation
         assertNotNull(result.sortPermutation());
-        assertArrayEquals(permutation[0], result.sortPermutation()[0]);
 
         compositeWriter.close();
     }
@@ -124,12 +130,12 @@ public class CompositeWriterSortPropagationTests extends OpenSearchTestCase {
      */
     static class RecordingWriter implements Writer<DocumentInput<?>> {
         final DataFormat format;
-        final long[][] sortPermutationToReturn;
+        final RowIdMapping sortPermutationToReturn;
         FlushInput lastFlushInput;
 
-        RecordingWriter(DataFormat format, long[][] sortPermutationToReturn) {
+        RecordingWriter(DataFormat format, long[][] rawPermutation) {
             this.format = format;
-            this.sortPermutationToReturn = sortPermutationToReturn;
+            this.sortPermutationToReturn = ArrayRowIdMapping.fromRawPermutation(rawPermutation);
         }
 
         @Override

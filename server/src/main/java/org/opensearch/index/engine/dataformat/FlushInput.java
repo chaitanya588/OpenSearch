@@ -18,15 +18,15 @@ import org.opensearch.common.annotation.ExperimentalApi;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public record FlushInput(long[][] sortPermutation) {
+public record FlushInput(RowIdMapping sortPermutation) {
 
     /** Empty flush input with no sort permutation. */
-    public static final FlushInput EMPTY = new FlushInput(null);
+    public static final FlushInput EMPTY = new FlushInput((RowIdMapping) null);
 
     /**
      * Returns whether a sort permutation is available.
      */
     public boolean hasSortPermutation() {
-        return sortPermutation != null && sortPermutation.length == 2 && sortPermutation[0].length > 0;
+        return sortPermutation != null;
     }
 }

@@ -20,6 +20,7 @@ import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.SortedNumericSortField;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.be.lucene.LuceneDataFormat;
+import org.opensearch.index.engine.dataformat.ArrayRowIdMapping;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.FlushInput;
 import org.opensearch.index.engine.exec.WriterFileSet;
@@ -71,7 +72,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
         // Sorted order:   4, 3, 2, 1, 0  (reverse)
         long[] oldRowIds = { 0, 1, 2, 3, 4 };
         long[] newRowIds = { 4, 3, 2, 1, 0 };
-        FlushInput sortedFlushInput = new FlushInput(new long[][] { oldRowIds, newRowIds });
+        FlushInput sortedFlushInput = new FlushInput(new ArrayRowIdMapping(oldRowIds, newRowIds, oldRowIds.length));
 
         try (LuceneWriter writer = new LuceneWriter(1L, dataFormat, baseDir, null, Codec.getDefault(), null)) {
             for (int i = 0; i < numDocs; i++) {
@@ -130,7 +131,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             oldRowIds[i] = i;
             newRowIds[i] = i;
         }
-        FlushInput sortedFlushInput = new FlushInput(new long[][] { oldRowIds, newRowIds });
+        FlushInput sortedFlushInput = new FlushInput(new ArrayRowIdMapping(oldRowIds, newRowIds, oldRowIds.length));
 
         try (LuceneWriter writer = new LuceneWriter(1L, dataFormat, baseDir, null, Codec.getDefault(), null)) {
             for (int i = 0; i < numDocs; i++) {
@@ -167,7 +168,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
         Path baseDir = createTempDir();
         long[] oldRowIds = { 0, 1 };
         long[] newRowIds = { 1, 0 };
-        FlushInput sortedFlushInput = new FlushInput(new long[][] { oldRowIds, newRowIds });
+        FlushInput sortedFlushInput = new FlushInput(new ArrayRowIdMapping(oldRowIds, newRowIds, oldRowIds.length));
 
         try (LuceneWriter writer = new LuceneWriter(1L, dataFormat, baseDir, null, Codec.getDefault(), null)) {
             FileInfos fileInfos = writer.flush(sortedFlushInput);
@@ -186,7 +187,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
 
         long[] oldRowIds = { 0, 1, 2 };
         long[] newRowIds = { 2, 0, 1 };
-        FlushInput sortedFlushInput = new FlushInput(new long[][] { oldRowIds, newRowIds });
+        FlushInput sortedFlushInput = new FlushInput(new ArrayRowIdMapping(oldRowIds, newRowIds, oldRowIds.length));
 
         try (LuceneWriter writer = new LuceneWriter(gen, dataFormat, baseDir, null, Codec.getDefault(), null)) {
             for (int i = 0; i < 3; i++) {
@@ -217,7 +218,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             oldRowIds[i] = i;
             newRowIds[i] = (i + 1) % numDocs;
         }
-        FlushInput sortedFlushInput = new FlushInput(new long[][] { oldRowIds, newRowIds });
+        FlushInput sortedFlushInput = new FlushInput(new ArrayRowIdMapping(oldRowIds, newRowIds, oldRowIds.length));
 
         try (LuceneWriter writer = new LuceneWriter(1L, dataFormat, baseDir, null, Codec.getDefault(), null)) {
             for (int i = 0; i < numDocs; i++) {

@@ -29,6 +29,7 @@ import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.FlushInput;
+import org.opensearch.index.engine.dataformat.RowIdMapping;
 import org.opensearch.index.engine.dataformat.WriteResult;
 import org.opensearch.index.engine.dataformat.Writer;
 import org.opensearch.index.engine.exec.WriterFileSet;
@@ -180,7 +181,6 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         }
 
         // If sort permutation is provided, configure the reorder merge policy
-        // and enable sequential __row_id__ rewrite on the codec
         if (flushInput.hasSortPermutation()) {
             configureSortedMerge(flushInput.sortPermutation());
         }
@@ -221,24 +221,8 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
      * that physically reorders docs via OneMerge.reorder(), and enables sequential
      * __row_id__ rewrite on the codec so the merge writes 0..N in one pass.
      */
-    private void configureSortedMerge(long[][] sortPermutation) {
-        long[] oldRowIds = sortPermutation[0];
-        long[] newRowIds = sortPermutation[1];
-        int numDocs = (int) docCount;
-        int[] oldToNew = new int[numDocs];
-        int[] newToOld = new int[numDocs];
-        Arrays.fill(oldToNew, -1);
-        Arrays.fill(newToOld, -1);
-        for (int i = 0; i < oldRowIds.length; i++) {
-            int oldDoc = (int) oldRowIds[i];
-            int newDoc = (int) newRowIds[i];
-            if (oldDoc >= 0 && oldDoc < numDocs && newDoc >= 0 && newDoc < numDocs) {
-                oldToNew[oldDoc] = newDoc;
-                newToOld[newDoc] = oldDoc;
-            }
-        }
-
-        indexWriter.getConfig().setMergePolicy(new ReorderingMergePolicy(oldToNew, newToOld, numDocs));
+    private void configureSortedMerge(RowIdMapping mapping) {
+        indexWriter.getConfig().setMergePolicy(new ReorderingMergePolicy(mapping));
         Codec currentCodec = indexWriter.getConfig().getCodec();
         if (currentCodec instanceof LuceneWriterCodec lwc) {
             lwc.enableRowIdRewrite();
@@ -250,15 +234,11 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
      * ReorderingOneMerge instances that override reorder() with our DocMap.
      */
     static class ReorderingMergePolicy extends MergePolicy {
-        private final int[] oldToNew;
-        private final int[] newToOld;
-        private final int totalDocs;
+        private final RowIdMapping mapping;
         private volatile boolean reorderDone = false;
 
-        ReorderingMergePolicy(int[] oldToNew, int[] newToOld, int totalDocs) {
-            this.oldToNew = oldToNew;
-            this.newToOld = newToOld;
-            this.totalDocs = totalDocs;
+        ReorderingMergePolicy(RowIdMapping mapping) {
+            this.mapping = mapping;
         }
 
         @Override
@@ -281,7 +261,7 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
                 return null;
             }
             MergeSpecification spec = new MergeSpecification();
-            spec.add(new ReorderingOneMerge(segments, oldToNew, newToOld, totalDocs));
+            spec.add(new ReorderingOneMerge(segments, mapping));
             return spec;
         }
 
@@ -297,15 +277,11 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
      * the merge according to the Parquet sort order.
      */
     static class ReorderingOneMerge extends MergePolicy.OneMerge {
-        private final int[] oldToNew;
-        private final int[] newToOld;
-        private final int totalDocs;
+        private final RowIdMapping mapping;
 
-        ReorderingOneMerge(List<SegmentCommitInfo> segments, int[] oldToNew, int[] newToOld, int totalDocs) {
+        ReorderingOneMerge(List<SegmentCommitInfo> segments, RowIdMapping mapping) {
             super(segments);
-            this.oldToNew = oldToNew;
-            this.newToOld = newToOld;
-            this.totalDocs = totalDocs;
+            this.mapping = mapping;
         }
 
         @Override
@@ -313,23 +289,17 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
             return new Sorter.DocMap() {
                 @Override
                 public int oldToNew(int docID) {
-                    if (docID >= 0 && docID < oldToNew.length) {
-                        return oldToNew[docID];
-                    }
-                    return docID;
+                    return mapping.oldToNew(docID);
                 }
 
                 @Override
                 public int newToOld(int docID) {
-                    if (docID >= 0 && docID < newToOld.length) {
-                        return newToOld[docID];
-                    }
-                    return docID;
+                    return mapping.newToOld(docID);
                 }
 
                 @Override
                 public int size() {
-                    return totalDocs;
+                    return mapping.size();
                 }
             };
         }

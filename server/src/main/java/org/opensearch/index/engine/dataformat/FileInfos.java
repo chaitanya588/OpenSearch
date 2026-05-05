@@ -21,7 +21,7 @@ import java.util.Optional;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public record FileInfos(Map<DataFormat, WriterFileSet> writerFilesMap, long[][] sortPermutation) {
+public record FileInfos(Map<DataFormat, WriterFileSet> writerFilesMap, RowIdMapping sortPermutation) {
 
     public FileInfos {
         writerFilesMap = Map.copyOf(new HashMap<>(writerFilesMap));
@@ -31,7 +31,7 @@ public record FileInfos(Map<DataFormat, WriterFileSet> writerFilesMap, long[][] 
      * Constructs FileInfos without a sort permutation.
      */
     public FileInfos(Map<DataFormat, WriterFileSet> writerFilesMap) {
-        this(writerFilesMap, null);
+        this(writerFilesMap, (RowIdMapping) null);
     }
 
     /**
@@ -70,7 +70,7 @@ public record FileInfos(Map<DataFormat, WriterFileSet> writerFilesMap, long[][] 
     @ExperimentalApi
     public static final class Builder {
         private final Map<DataFormat, WriterFileSet> writerFilesMap = new HashMap<>();
-        private long[][] sortPermutation;
+        private RowIdMapping sortPermutation;
 
         /**
          * Adds a writer file set for a specific data format.
@@ -98,10 +98,10 @@ public record FileInfos(Map<DataFormat, WriterFileSet> writerFilesMap, long[][] 
         /**
          * Sets the sort permutation produced during sort-on-close.
          *
-         * @param sortPermutation [0] = old_row_ids, [1] = new_row_ids, or null
+         * @param sortPermutation the row ID mapping, or null
          * @return this builder
          */
-        public Builder sortPermutation(long[][] sortPermutation) {
+        public Builder sortPermutation(RowIdMapping sortPermutation) {
             this.sortPermutation = sortPermutation;
             return this;
         }
