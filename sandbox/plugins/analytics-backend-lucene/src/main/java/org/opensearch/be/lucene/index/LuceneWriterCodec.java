@@ -19,6 +19,9 @@ import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.SortedNumericDocValues;
+import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.SortedNumericSortField;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.opensearch.index.engine.dataformat.FlushInput;
@@ -68,8 +71,17 @@ public class LuceneWriterCodec extends FilterCodec {
 
     /**
      * Returns a {@link SegmentInfoFormat} that delegates reads to the underlying codec and
-     * intercepts writes to inject the {@code writer_generation} attribute into the
-     * {@link SegmentInfo} before persisting.
+     * intercepts writes to:
+     * <ol>
+     *   <li>Inject the {@code writer_generation} attribute</li>
+     *   <li>Stamp the IndexSort ({@code __row_id__} ascending) into the {@link SegmentInfo}</li>
+     * </ol>
+     * <p>
+     * The sort stamp is unconditional because the child writer always produces segments
+     * where {@code __row_id__} values are sequential (0, 1, 2, ...), meaning the segment
+     * is inherently sorted by {@code __row_id__}. Declaring this in the segment metadata
+     * ensures compatibility with {@code addIndexes(Directory...)} on the shared writer
+     * which has the same IndexSort configured.
      *
      * @return the decorated segment info format
      */
@@ -84,7 +96,34 @@ public class LuceneWriterCodec extends FilterCodec {
             @Override
             public void write(Directory directory, SegmentInfo info, IOContext ioContext) throws IOException {
                 info.putAttribute("writer_generation", String.valueOf(writerGeneration));
-                delegate.segmentInfoFormat().write(directory, info, ioContext);
+
+                // Always declare the IndexSort on __row_id__. The child writer produces
+                // segments with sequential row IDs (0, 1, 2, ...) so the data is already
+                // physically sorted. This metadata is required for addIndexes(Directory...)
+                // compatibility with the shared writer's IndexSort.
+                if (info.getIndexSort() == null) {
+                    Sort sort = new Sort(new SortedNumericSortField(ROW_ID, SortField.Type.LONG));
+                    SegmentInfo sortedInfo = new SegmentInfo(
+                        info.dir,
+                        info.getVersion(),
+                        info.getMinVersion(),
+                        info.name,
+                        info.maxDoc(),
+                        info.getUseCompoundFile(),
+                        info.getHasBlocks(),
+                        info.getCodec(),
+                        info.getDiagnostics(),
+                        info.getId(),
+                        info.getAttributes(),
+                        sort
+                    );
+                    // Initialize the files set — Lucene99SegmentInfoFormat.write() calls
+                    // addFile() on the SegmentInfo which requires a non-null set.
+                    sortedInfo.setFiles(info.files());
+                    delegate.segmentInfoFormat().write(directory, sortedInfo, ioContext);
+                } else {
+                    delegate.segmentInfoFormat().write(directory, info, ioContext);
+                }
             }
         };
     }

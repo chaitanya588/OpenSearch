@@ -194,25 +194,12 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         indexWriter.forceMerge(1, true);
         indexWriter.commit();
 
-        // Close the IndexWriter before rewriting segment metadata.
-        // This prevents IndexFileDeleter from removing our rewritten segments_N
-        // file (which it wouldn't recognize as its own commit).
-        indexWriter.close();
-
         // Verify the invariant: exactly 1 segment with docCount documents
         SegmentInfos segmentInfos = SegmentInfos.readLatestCommit(directory);
         assert segmentInfos.size() == 1 : "Expected exactly 1 segment after force merge, got " + segmentInfos.size();
 
         SegmentCommitInfo segmentInfo = segmentInfos.info(0);
         assert segmentInfo.info.maxDoc() == docCount : "Expected " + docCount + " docs in segment, got " + segmentInfo.info.maxDoc();
-
-        // Stamp the IndexSort on the segment metadata post-commit so that
-        // addIndexes(Directory...) on the shared writer sees matching sort.
-        // The segment is always sorted by __row_id__ — either naturally (docs
-        // written sequentially) or via OneMerge.reorder() + row ID rewrite.
-        if (segmentInfo.info.getIndexSort() == null) {
-            rewriteSegmentInfoWithSort(segmentInfos, segmentInfo);
-        }
 
         // Build the WriterFileSet pointing to the temp directory
         WriterFileSet.Builder wfsBuilder = WriterFileSet.builder()
@@ -227,7 +214,8 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
             }
         }
 
-        // Close the directory after building file list
+        // Since flush is once only, we can close the writer post this.
+        indexWriter.close();
         directory.close();
 
         return FileInfos.builder().putWriterFileSet(dataFormat, wfsBuilder.build()).build();
@@ -244,64 +232,6 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         if (currentCodec instanceof LuceneWriterCodec lwc) {
             lwc.enableRowIdRewrite();
         }
-    }
-
-    /**
-     * Rewrites the segment's .si file and segments_N commit to declare the IndexSort.
-     * <p>
-     * After the child writer commits, the segment on disk has no IndexSort metadata
-     * (because the writer operates without IndexSort to allow OneMerge.reorder()).
-     * However, the segment is logically sorted by __row_id__ (either naturally sequential
-     * or via reorder + row ID rewrite). This method reconstructs the SegmentInfo with
-     * the expected sort, rewrites the .si file, and re-commits the SegmentInfos so that
-     * addIndexes(Directory...) on the shared writer sees matching sort metadata.
-     *
-     * @param segmentInfos the current committed SegmentInfos
-     * @param segmentCommitInfo the single segment's commit info
-     * @throws IOException if rewriting fails
-     */
-    private void rewriteSegmentInfoWithSort(SegmentInfos segmentInfos, SegmentCommitInfo segmentCommitInfo) throws IOException {
-        SegmentInfo originalInfo = segmentCommitInfo.info;
-        Sort sort = new Sort(new SortedNumericSortField(LuceneDocumentInput.ROW_ID_FIELD, SortField.Type.LONG));
-
-        // Reconstruct SegmentInfo with the IndexSort declared
-        SegmentInfo sortedInfo = new SegmentInfo(
-            originalInfo.dir,
-            originalInfo.getVersion(),
-            originalInfo.getMinVersion(),
-            originalInfo.name,
-            originalInfo.maxDoc(),
-            originalInfo.getUseCompoundFile(),
-            originalInfo.getHasBlocks(),
-            originalInfo.getCodec(),
-            originalInfo.getDiagnostics(),
-            originalInfo.getId(),
-            originalInfo.getAttributes(),
-            sort
-        );
-        sortedInfo.setFiles(originalInfo.files());
-
-        // Delete the existing .si file before rewriting — Lucene's createOutput
-        // does not overwrite existing files.
-        String siFileName = originalInfo.name + ".si";
-        directory.deleteFile(siFileName);
-
-        // Rewrite the .si file with sort metadata
-        originalInfo.getCodec().segmentInfoFormat().write(directory, sortedInfo, IOContext.DEFAULT);
-
-        // Replace the segment in SegmentInfos and re-commit so segments_N is consistent
-        SegmentCommitInfo newCommitInfo = new SegmentCommitInfo(
-            sortedInfo,
-            segmentCommitInfo.getDelCount(),
-            segmentCommitInfo.getSoftDelCount(),
-            segmentCommitInfo.getDelGen(),
-            segmentCommitInfo.getFieldInfosGen(),
-            segmentCommitInfo.getDocValuesGen(),
-            segmentCommitInfo.getId()
-        );
-        segmentInfos.clear();
-        segmentInfos.add(newCommitInfo);
-        segmentInfos.commit(directory);
     }
 
     /**
