@@ -194,6 +194,11 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         indexWriter.forceMerge(1, true);
         indexWriter.commit();
 
+        // Close the IndexWriter before rewriting segment metadata.
+        // This prevents IndexFileDeleter from removing our rewritten segments_N
+        // file (which it wouldn't recognize as its own commit).
+        indexWriter.close();
+
         // Verify the invariant: exactly 1 segment with docCount documents
         SegmentInfos segmentInfos = SegmentInfos.readLatestCommit(directory);
         assert segmentInfos.size() == 1 : "Expected exactly 1 segment after force merge, got " + segmentInfos.size();
@@ -205,9 +210,9 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         // addIndexes(Directory...) on the shared writer sees matching sort.
         // The segment is always sorted by __row_id__ — either naturally (docs
         // written sequentially) or via OneMerge.reorder() + row ID rewrite.
-//        if (segmentInfo.info.getIndexSort() == null) {
-//            rewriteSegmentInfoWithSort(segmentInfos, segmentInfo);
-//        }
+        if (segmentInfo.info.getIndexSort() == null) {
+            rewriteSegmentInfoWithSort(segmentInfos, segmentInfo);
+        }
 
         // Build the WriterFileSet pointing to the temp directory
         WriterFileSet.Builder wfsBuilder = WriterFileSet.builder()
@@ -222,8 +227,7 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
             }
         }
 
-        // Since flush is once only, we can close the write post this.
-        indexWriter.close();
+        // Close the directory after building file list
         directory.close();
 
         return FileInfos.builder().putWriterFileSet(dataFormat, wfsBuilder.build()).build();
@@ -332,7 +336,7 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
                 return null;
             }
             MergeSpecification spec = new MergeSpecification();
-            spec.add(new RowIdRemappingOneMerge(segments, mapping));
+            spec.add(new ReorderingOneMerge(segments, mapping));
             return spec;
         }
 
