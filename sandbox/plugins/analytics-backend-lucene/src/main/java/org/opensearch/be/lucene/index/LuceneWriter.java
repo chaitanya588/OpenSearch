@@ -19,12 +19,17 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.MergeTrigger;
 import org.apache.lucene.index.SegmentCommitInfo;
+import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.Sorter;
 import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.SortedNumericSortField;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.MMapDirectory;
 import org.opensearch.be.lucene.LuceneDataFormat;
+import org.opensearch.be.lucene.merge.RowIdRemappingOneMerge;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.engine.dataformat.FileInfos;
@@ -196,6 +201,14 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         SegmentCommitInfo segmentInfo = segmentInfos.info(0);
         assert segmentInfo.info.maxDoc() == docCount : "Expected " + docCount + " docs in segment, got " + segmentInfo.info.maxDoc();
 
+        // Stamp the IndexSort on the segment metadata post-commit so that
+        // addIndexes(Directory...) on the shared writer sees matching sort.
+        // The segment is always sorted by __row_id__ — either naturally (docs
+        // written sequentially) or via OneMerge.reorder() + row ID rewrite.
+//        if (segmentInfo.info.getIndexSort() == null) {
+//            rewriteSegmentInfoWithSort(segmentInfos, segmentInfo);
+//        }
+
         // Build the WriterFileSet pointing to the temp directory
         WriterFileSet.Builder wfsBuilder = WriterFileSet.builder()
             .directory(tempDirectory)
@@ -230,6 +243,64 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
     }
 
     /**
+     * Rewrites the segment's .si file and segments_N commit to declare the IndexSort.
+     * <p>
+     * After the child writer commits, the segment on disk has no IndexSort metadata
+     * (because the writer operates without IndexSort to allow OneMerge.reorder()).
+     * However, the segment is logically sorted by __row_id__ (either naturally sequential
+     * or via reorder + row ID rewrite). This method reconstructs the SegmentInfo with
+     * the expected sort, rewrites the .si file, and re-commits the SegmentInfos so that
+     * addIndexes(Directory...) on the shared writer sees matching sort metadata.
+     *
+     * @param segmentInfos the current committed SegmentInfos
+     * @param segmentCommitInfo the single segment's commit info
+     * @throws IOException if rewriting fails
+     */
+    private void rewriteSegmentInfoWithSort(SegmentInfos segmentInfos, SegmentCommitInfo segmentCommitInfo) throws IOException {
+        SegmentInfo originalInfo = segmentCommitInfo.info;
+        Sort sort = new Sort(new SortedNumericSortField(LuceneDocumentInput.ROW_ID_FIELD, SortField.Type.LONG));
+
+        // Reconstruct SegmentInfo with the IndexSort declared
+        SegmentInfo sortedInfo = new SegmentInfo(
+            originalInfo.dir,
+            originalInfo.getVersion(),
+            originalInfo.getMinVersion(),
+            originalInfo.name,
+            originalInfo.maxDoc(),
+            originalInfo.getUseCompoundFile(),
+            originalInfo.getHasBlocks(),
+            originalInfo.getCodec(),
+            originalInfo.getDiagnostics(),
+            originalInfo.getId(),
+            originalInfo.getAttributes(),
+            sort
+        );
+        sortedInfo.setFiles(originalInfo.files());
+
+        // Delete the existing .si file before rewriting — Lucene's createOutput
+        // does not overwrite existing files.
+        String siFileName = originalInfo.name + ".si";
+        directory.deleteFile(siFileName);
+
+        // Rewrite the .si file with sort metadata
+        originalInfo.getCodec().segmentInfoFormat().write(directory, sortedInfo, IOContext.DEFAULT);
+
+        // Replace the segment in SegmentInfos and re-commit so segments_N is consistent
+        SegmentCommitInfo newCommitInfo = new SegmentCommitInfo(
+            sortedInfo,
+            segmentCommitInfo.getDelCount(),
+            segmentCommitInfo.getSoftDelCount(),
+            segmentCommitInfo.getDelGen(),
+            segmentCommitInfo.getFieldInfosGen(),
+            segmentCommitInfo.getDocValuesGen(),
+            segmentCommitInfo.getId()
+        );
+        segmentInfos.clear();
+        segmentInfos.add(newCommitInfo);
+        segmentInfos.commit(directory);
+    }
+
+    /**
      * MergePolicy that wraps the standard merge selection but returns
      * ReorderingOneMerge instances that override reorder() with our DocMap.
      */
@@ -261,7 +332,7 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
                 return null;
             }
             MergeSpecification spec = new MergeSpecification();
-            spec.add(new ReorderingOneMerge(segments, mapping));
+            spec.add(new RowIdRemappingOneMerge(segments, mapping));
             return spec;
         }
 

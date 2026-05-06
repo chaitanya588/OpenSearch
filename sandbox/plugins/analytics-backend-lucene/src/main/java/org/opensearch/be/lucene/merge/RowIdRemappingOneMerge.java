@@ -30,12 +30,12 @@ import java.util.List;
  * @opensearch.experimental
  */
 @ExperimentalApi
-class RowIdRemappingOneMerge extends MergePolicy.OneMerge {
+public class RowIdRemappingOneMerge extends MergePolicy.OneMerge {
 
     private final RowIdMapping rowIdMapping;
     private int nextRowIdOffset;
 
-    RowIdRemappingOneMerge(List<SegmentCommitInfo> segments, RowIdMapping rowIdMapping) {
+    public RowIdRemappingOneMerge(List<SegmentCommitInfo> segments, RowIdMapping rowIdMapping) {
         super(segments);
         this.rowIdMapping = rowIdMapping;
         this.nextRowIdOffset = 0;

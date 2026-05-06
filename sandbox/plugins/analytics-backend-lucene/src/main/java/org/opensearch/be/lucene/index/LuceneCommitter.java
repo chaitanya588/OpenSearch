@@ -223,6 +223,8 @@ public class LuceneCommitter extends SafeBootstrapCommitter {
         iwc.setRAMBufferSizeMB(engineConfig.getIndexingBufferSize().getMbFrac());
         iwc.setUseCompoundFile(engineConfig.useCompoundFile());
 
+        iwc.setIndexSort(new Sort(new RowIdRemappingSortField("__row_id__")));
+
         iwc.setCommitOnClose(false);
         iwc.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
         iwc.setIndexDeletionPolicy(deletionPolicy);
