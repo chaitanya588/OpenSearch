@@ -12,6 +12,7 @@ import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.MergeInput;
 import org.opensearch.index.engine.dataformat.MergeResult;
 import org.opensearch.index.engine.dataformat.Merger;
+import org.opensearch.index.engine.dataformat.PackedRowIdMapping;
 import org.opensearch.index.engine.dataformat.RowIdMapping;
 import org.opensearch.index.engine.exec.Segment;
 import org.opensearch.index.engine.exec.WriterFileSet;
@@ -41,9 +42,9 @@ public class MockMerger implements Merger {
             fileMetadataList.addAll(segment.dfGroupedSearchableFiles().values());
         }
         long newWriterGeneration = mergeInput.newWriterGeneration();
-        RowIdMapping existingMapping = mergeInput.rowIdMapping();
+        Map<Long, RowIdMapping> existingMappings = mergeInput.rowIdMappings();
 
-        String prefix = existingMapping != null ? "secondary_merged_gen" : "merged_gen";
+        String prefix = (existingMappings != null && existingMappings.isEmpty() == false) ? "secondary_merged_gen" : "merged_gen";
         WriterFileSet merged = WriterFileSet.builder()
             .directory(directory)
             .writerGeneration(newWriterGeneration)
@@ -51,18 +52,22 @@ public class MockMerger implements Merger {
             .addNumRows(fileMetadataList.stream().mapToLong(WriterFileSet::numRows).sum())
             .build();
 
-        if (existingMapping != null) {
-            return new MergeResult(Map.of(dataFormat, merged), existingMapping);
+        if (existingMappings != null && existingMappings.isEmpty() == false) {
+            return new MergeResult(Map.of(dataFormat, merged), existingMappings);
         }
 
-        Map<Long, Long> genOffsets = new HashMap<>();
+        Map<Long, RowIdMapping> mappings = new HashMap<>();
         long offset = 0;
         for (WriterFileSet fs : fileMetadataList) {
-            genOffsets.put(fs.writerGeneration(), offset);
+            final long currentOffset = offset;
+            long[] mapping = new long[(int) fs.numRows()];
+            for (int i = 0; i < mapping.length; i++) {
+                mapping[i] = currentOffset + i;
+            }
+            mappings.put(fs.writerGeneration(), new PackedRowIdMapping(mapping, false));
             offset += fs.numRows();
         }
-        RowIdMapping mapping = (oldId, oldGeneration) -> genOffsets.getOrDefault(oldGeneration, 0L) + oldId;
 
-        return new MergeResult(Map.of(dataFormat, merged), mapping);
+        return new MergeResult(Map.of(dataFormat, merged), mappings);
     }
 }

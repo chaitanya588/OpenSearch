@@ -34,6 +34,7 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.dataformat.MergeInput;
 import org.opensearch.index.engine.dataformat.MergeResult;
+import org.opensearch.index.engine.dataformat.PackedRowIdMapping;
 import org.opensearch.index.engine.dataformat.RowIdMapping;
 import org.opensearch.index.engine.exec.Segment;
 import org.opensearch.test.OpenSearchTestCase;
@@ -149,23 +150,21 @@ public class LuceneMergerTests extends OpenSearchTestCase {
         Map<Long, Map<Long, Long>> mapping = new HashMap<>();
         mapping.put(1L, Map.of(0L, 0L, 1L, 2L, 2L, 4L));
         mapping.put(2L, Map.of(0L, 1L, 1L, 3L));
-        RowIdMapping rowIdMapping = (oldId, oldGeneration) -> {
-            Map<Long, Long> genMap = mapping.get(oldGeneration);
-            if (genMap != null && genMap.containsKey(oldId)) {
-                return genMap.get(oldId);
-            }
-            return oldId;
-        };
+        Map<Long, RowIdMapping> rowIdMappings = new HashMap<>();
+        long[] gen1Mapping = new long[] { 0, 2, 4 };  // 0→0, 1→2, 2→4
+        long[] gen2Mapping = new long[] { 1, 3 };     // 0→1, 1→3
+        rowIdMappings.put(1L, new PackedRowIdMapping(gen1Mapping, false));
+        rowIdMappings.put(2L, new PackedRowIdMapping(gen2Mapping, false));
 
         LuceneMerger merger = new LuceneMerger(writer, new LuceneDataFormat(), dataPath);
         SegmentInfos infos = getSegmentInfos(writer);
         List<Segment> segments = buildSegments(infos);
 
-        MergeInput input = MergeInput.builder().segments(segments).rowIdMapping(rowIdMapping).newWriterGeneration(10L).build();
+        MergeInput input = MergeInput.builder().segments(segments).rowIdMappings(rowIdMappings).newWriterGeneration(10L).build();
 
         MergeResult result = merger.merge(input);
         assertNotNull(result);
-        assertTrue(result.rowIdMapping().isPresent());
+        assertTrue(result.rowIdMappings().isPresent());
 
         writer.commit();
 
@@ -219,9 +218,16 @@ public class LuceneMergerTests extends OpenSearchTestCase {
 
         // Identity mapping — writeSegmentWithRichFields already writes globally-unique row IDs
         // (0,1,2 in gen=1 and 3,4 in gen=2), so returning the original row ID is well-formed.
-        RowIdMapping identityMapping = (oldId, oldGeneration) -> oldId;
+        Map<Long, RowIdMapping> identityMappings = new HashMap<>();
+        for (Segment seg : segments) {
+            int maxDoc = 3; // each segment has 3 docs in this test
+            long[] identity = new long[maxDoc];
+            for (int i = 0; i < maxDoc; i++)
+                identity[i] = i;
+            identityMappings.put(seg.generation(), new PackedRowIdMapping(identity, false));
+        }
 
-        MergeInput input = MergeInput.builder().segments(segments).rowIdMapping(identityMapping).newWriterGeneration(10L).build();
+        MergeInput input = MergeInput.builder().segments(segments).rowIdMappings(identityMappings).newWriterGeneration(10L).build();
         merger.merge(input);
         writer.commit();
 

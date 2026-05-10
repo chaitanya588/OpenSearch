@@ -140,18 +140,18 @@ public class DataFormatPluginTests extends OpenSearchTestCase {
         WriterFileSet merged = mergeResult.getMergedWriterFileSetForDataformat(format);
         assertNotNull(merged);
         assertEquals(3L, merged.writerGeneration());
-        assertTrue(mergeResult.rowIdMapping().isPresent());
+        assertTrue(mergeResult.rowIdMappings().isPresent());
 
         // Verify row ID mapping
-        RowIdMapping mapping = mergeResult.rowIdMapping().get();
-        assertEquals(0L, mapping.getNewRowId(0, 1L));
-        assertEquals(1L, mapping.getNewRowId(1, 1L));
-        assertEquals(2L, mapping.getNewRowId(0, 2L));
+        Map<Long, RowIdMapping> mappings = mergeResult.rowIdMappings().get();
+        assertEquals(0L, mappings.get(1L).getNewRowId(0));
+        assertEquals(1L, mappings.get(1L).getNewRowId(1));
+        assertEquals(2L, mappings.get(2L).getNewRowId(0));
 
         // 6. Merge with an existing RowIdMapping (secondary data format merge)
         MergeInput secondaryMergeInput = MergeInput.builder()
             .segments(List.of(seg1, seg2))
-            .rowIdMapping(mapping)
+            .rowIdMappings(mappings)
             .newWriterGeneration(4L)
             .build();
         MergeResult secondaryMerge = merger.merge(secondaryMergeInput);
@@ -224,12 +224,12 @@ public class DataFormatPluginTests extends OpenSearchTestCase {
         WriterFileSet fileSet = WriterFileSet.builder().directory(dir).writerGeneration(1L).addNumRows(5).addFile("merged.parquet").build();
 
         MergeResult withoutMapping = new MergeResult(Map.of(format, fileSet));
-        assertFalse(withoutMapping.rowIdMapping().isPresent());
+        assertFalse(withoutMapping.rowIdMappings().isPresent());
         assertEquals(fileSet, withoutMapping.getMergedWriterFileSetForDataformat(format));
 
-        RowIdMapping mapping = (oldId, oldGen) -> oldId;
-        MergeResult withMapping = new MergeResult(Map.of(format, fileSet), mapping);
-        assertTrue(withMapping.rowIdMapping().isPresent());
+        Map<Long, RowIdMapping> mappings = Map.of(1L, new PackedRowIdMapping(new long[] { 0 }, false));
+        MergeResult withMapping = new MergeResult(Map.of(format, fileSet), mappings);
+        assertTrue(withMapping.rowIdMappings().isPresent());
     }
 
     /**

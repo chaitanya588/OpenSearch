@@ -11,7 +11,9 @@ package org.opensearch.index.engine.dataformat;
 import org.opensearch.common.annotation.ExperimentalApi;
 
 /**
- * Mapping interface for translating old row IDs to new row IDs after a merge or sort operation.
+ * Mapping interface for translating row IDs after a merge or sort operation.
+ * Supports forward (old→new) lookup always, and optionally reverse (new→old) lookup
+ * when constructed with reverse support enabled.
  *
  * @opensearch.experimental
  */
@@ -19,43 +21,33 @@ import org.opensearch.common.annotation.ExperimentalApi;
 public interface RowIdMapping {
 
     /**
-     * Returns the new row ID corresponding to the given old row ID and generation.
+     * Returns the new row ID corresponding to the given old row ID.
      *
      * @param oldId the original row ID
-     * @param oldGeneration the original writer generation
      * @return the new row ID, or -1 if not found
      */
-    long getNewRowId(long oldId, long oldGeneration);
+    long getNewRowId(long oldId);
 
     /**
-     * Returns the new doc position for the given old doc position.
-     * Used during single-generation flush sort where generation is implicit.
-     * Default is identity (no reordering).
+     * Returns the old row ID corresponding to the given new row ID.
      *
-     * @param oldDocId the original document position
-     * @return the new document position
+     * @param newId the new row ID
+     * @return the old row ID
+     * @throws UnsupportedOperationException if reverse mapping is not supported
      */
-    default int oldToNew(int oldDocId) {
-        return oldDocId;
-    }
+    long newToOld(long newId);
 
     /**
-     * Returns the old doc position for the given new doc position.
-     * Required by Lucene's Sorter.DocMap for physical reordering.
+     * Returns whether reverse (new→old) lookup is supported.
      *
-     * @param newDocId the new document position
-     * @return the original document position, or the input if out of range
+     * @return true if {@link #newToOld(long)} is available
      */
-    default int newToOld(int newDocId) {
-        return newDocId;
-    }
+    boolean isNewToOldSupported();
 
     /**
      * Returns the total number of documents in this mapping.
      *
      * @return the total document count
      */
-    default int size() {
-        return 0;
-    }
+    int size();
 }

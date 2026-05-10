@@ -9,7 +9,6 @@
 package org.opensearch.parquet.bridge;
 
 import org.opensearch.index.engine.dataformat.PackedRowIdMapping;
-import org.opensearch.index.engine.dataformat.PackedSingleGenRowIdMapping;
 import org.opensearch.index.engine.dataformat.RowIdMapping;
 import org.opensearch.nativebridge.spi.NativeCall;
 import org.opensearch.nativebridge.spi.NativeLibraryLoader;
@@ -237,7 +236,8 @@ public class RustBridge {
     /**
      * Result of finalizing a writer: metadata + optional row ID mapping.
      */
-    record WriterFinalizeResult(ParquetFileMetadata metadata, RowIdMapping rowIdMapping) {}
+    record WriterFinalizeResult(ParquetFileMetadata metadata, RowIdMapping rowIdMapping) {
+    }
 
     static WriterFinalizeResult finalizeWriter(String file) throws IOException {
         try (var call = new NativeCall()) {
@@ -281,7 +281,7 @@ public class RustBridge {
                     long[] mappingArray = MemorySegment.ofAddress(permAddr)
                         .reinterpret(permLen * ValueLayout.JAVA_LONG.byteSize())
                         .toArray(ValueLayout.JAVA_LONG);
-                    rowIdMapping = new PackedSingleGenRowIdMapping(mappingArray);
+                    rowIdMapping = new PackedRowIdMapping(mappingArray, true);
                 } finally {
                     NativeCall.invokeVoid(FREE_ROW_ID_MAPPING, permAddr, permLen);
                 }
@@ -412,7 +412,7 @@ public class RustBridge {
                 crc32Out.get(ValueLayout.JAVA_LONG, 0)
             );
 
-            RowIdMapping rowIdMapping = readAndFreeMergeResult(
+            Map<Long, RowIdMapping> rowIdMappings = readAndFreeMergeResult(
                 outMappingPtr,
                 outMappingLen,
                 outGenKeysPtr,
@@ -421,13 +421,13 @@ public class RustBridge {
                 outGenCount
             );
 
-            return new MergeFilesResult(rowIdMapping, metadata);
+            return new MergeFilesResult(rowIdMappings, metadata);
         } catch (IOException e) {
             throw new UncheckedIOException("Native merge failed", e);
         }
     }
 
-    private static RowIdMapping readAndFreeMergeResult(
+    private static Map<Long, RowIdMapping> readAndFreeMergeResult(
         MemorySegment outMappingPtr,
         MemorySegment outMappingLen,
         MemorySegment outGenKeysPtr,
@@ -459,14 +459,15 @@ public class RustBridge {
                 .reinterpret(genCount * ValueLayout.JAVA_INT.byteSize())
                 .toArray(ValueLayout.JAVA_INT);
 
-            Map<Long, Integer> offsetMap = new HashMap<>((int) genCount);
-            Map<Long, Integer> sizeMap = new HashMap<>((int) genCount);
+            // Build per-generation PackedRowIdMapping instances directly from the flat array
+            Map<Long, RowIdMapping> result = new HashMap<>((int) genCount);
             for (int i = 0; i < (int) genCount; i++) {
-                offsetMap.put(genKeys[i], genOffsets[i]);
-                sizeMap.put(genKeys[i], genSizes[i]);
+                int offset = genOffsets[i];
+                int size = genSizes[i];
+                result.put(genKeys[i], new PackedRowIdMapping(mappingArray, offset, size, false));
             }
 
-            return new PackedRowIdMapping(mappingArray, offsetMap, sizeMap);
+            return result;
         } finally {
             NativeCall.invokeVoid(FREE_MERGE_RESULT, mappingAddr, mappingLen, genKeysAddr, genOffsetsAddr, genSizesAddr, genCount);
         }

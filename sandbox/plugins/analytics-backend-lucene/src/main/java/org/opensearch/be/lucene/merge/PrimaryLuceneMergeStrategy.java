@@ -15,13 +15,14 @@ import org.opensearch.index.engine.dataformat.MergeInput;
 import org.opensearch.index.engine.dataformat.RowIdMapping;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Merge strategy for when Lucene is the <b>primary</b> data format in a composite index.
  *
  * <p>As the primary format, Lucene performs a standard merge (no row ID remapping on input)
- * and produces a {@link RowIdMapping} that secondary formats use to align their document
- * order with the merged output.
+ * and produces a {@code Map<Long, RowIdMapping>} that secondary formats use to align their
+ * document order with the merged output.
  *
  * <p>The mapping is built after the merge completes by reading the merged segment to
  * determine how documents from each source generation were reordered.
@@ -32,12 +33,12 @@ import java.util.List;
 public class PrimaryLuceneMergeStrategy implements LuceneMergeStrategy {
 
     @Override
-    public MergePolicy.OneMerge createOneMerge(List<SegmentCommitInfo> segments, RowIdMapping rowIdMapping) {
+    public MergePolicy.OneMerge createOneMerge(List<SegmentCommitInfo> segments, Map<Long, RowIdMapping> rowIdMappings) {
         throw new UnsupportedOperationException("Primary Lucene merge strategy is not yet implemented");
     }
 
     @Override
-    public RowIdMapping buildRowIdMapping(MergePolicy.OneMerge completedMerge, MergeInput mergeInput) {
+    public Map<Long, RowIdMapping> buildRowIdMappings(MergePolicy.OneMerge completedMerge, MergeInput mergeInput) {
         throw new UnsupportedOperationException("Primary Lucene merge strategy is not yet implemented");
     }
 }

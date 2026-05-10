@@ -13,7 +13,10 @@ import org.opensearch.index.engine.exec.Segment;
 import org.opensearch.index.engine.exec.WriterFileSet;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -23,14 +26,15 @@ import java.util.Objects;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public record MergeInput(List<Segment> segments, RowIdMapping rowIdMapping, long newWriterGeneration) {
+public record MergeInput(List<Segment> segments, Map<Long, RowIdMapping> rowIdMappings, long newWriterGeneration) {
 
     public MergeInput {
         segments = List.copyOf(segments);
+        rowIdMappings = rowIdMappings != null ? Collections.unmodifiableMap(new HashMap<>(rowIdMappings)) : null;
     }
 
     private MergeInput(Builder builder) {
-        this(new ArrayList<>(builder.segments), builder.rowIdMapping, builder.newWriterGeneration);
+        this(new ArrayList<>(builder.segments), builder.rowIdMappings, builder.newWriterGeneration);
     }
 
     /**
@@ -41,6 +45,23 @@ public record MergeInput(List<Segment> segments, RowIdMapping rowIdMapping, long
      */
     public List<WriterFileSet> getFilesForFormat(String formatName) {
         return segments.stream().map(seg -> seg.dfGroupedSearchableFiles().get(formatName)).filter(Objects::nonNull).toList();
+    }
+
+    /**
+     * Returns whether row ID mappings are available.
+     */
+    public boolean hasRowIdMappings() {
+        return rowIdMappings != null && rowIdMappings.isEmpty() == false;
+    }
+
+    /**
+     * Returns the row ID mapping for a specific generation, or null if not found.
+     *
+     * @param generation the writer generation
+     * @return the row ID mapping for that generation, or null
+     */
+    public RowIdMapping getRowIdMapping(long generation) {
+        return rowIdMappings != null ? rowIdMappings.get(generation) : null;
     }
 
     /**
@@ -58,7 +79,7 @@ public record MergeInput(List<Segment> segments, RowIdMapping rowIdMapping, long
     @ExperimentalApi
     public static class Builder {
         private List<Segment> segments = new ArrayList<>();
-        private RowIdMapping rowIdMapping;
+        private Map<Long, RowIdMapping> rowIdMappings;
         private long newWriterGeneration;
 
         private Builder() {}
@@ -86,13 +107,13 @@ public record MergeInput(List<Segment> segments, RowIdMapping rowIdMapping, long
         }
 
         /**
-         * Sets the row ID mapping for secondary data format merges.
+         * Sets the row ID mappings for secondary data format merges, keyed by writer generation.
          *
-         * @param rowIdMapping the row ID mapping
+         * @param rowIdMappings the row ID mappings per generation
          * @return this builder
          */
-        public Builder rowIdMapping(RowIdMapping rowIdMapping) {
-            this.rowIdMapping = rowIdMapping;
+        public Builder rowIdMappings(Map<Long, RowIdMapping> rowIdMappings) {
+            this.rowIdMappings = rowIdMappings;
             return this;
         }
 

@@ -93,7 +93,7 @@ public class LuceneMerger implements Merger {
 
     @Override
     public MergeResult merge(MergeInput mergeInput) throws IOException {
-        RowIdMapping rowIdMapping = mergeInput.rowIdMapping();
+        Map<Long, RowIdMapping> rowIdMappings = mergeInput.rowIdMappings();
         List<Segment> segments = mergeInput.segments();
 
         if (segments.isEmpty()) {
@@ -131,7 +131,7 @@ public class LuceneMerger implements Merger {
         );
 
         // Delegate OneMerge creation to the strategy (primary vs secondary behavior)
-        MergePolicy.OneMerge oneMerge = strategy.createOneMerge(matchingSegments, rowIdMapping);
+        MergePolicy.OneMerge oneMerge = strategy.createOneMerge(matchingSegments, rowIdMappings);
         indexWriter.executeMerge(oneMerge, mergeInput.newWriterGeneration());
 
         // Stamp the merged segment with its writer generation so downstream lookups
@@ -151,7 +151,7 @@ public class LuceneMerger implements Merger {
         WriterFileSet mergedFileSet = buildMergedFileSet(mergedInfo, mergeInput.newWriterGeneration());
 
         // Delegate RowIdMapping production to the strategy
-        RowIdMapping outputMapping = strategy.buildRowIdMapping(oneMerge, mergeInput);
+        Map<Long, RowIdMapping> outputMappings = strategy.buildRowIdMappings(oneMerge, mergeInput);
 
         logger.debug(
             "LuceneMerger: completed merge of {} segments at generation {} ({} docs, {} files)",
@@ -161,7 +161,7 @@ public class LuceneMerger implements Merger {
             oneMerge.getMergeInfo().files().size()
         );
 
-        return new MergeResult(Map.of(dataFormat, mergedFileSet), outputMapping);
+        return new MergeResult(Map.of(dataFormat, mergedFileSet), outputMappings);
     }
 
     /**

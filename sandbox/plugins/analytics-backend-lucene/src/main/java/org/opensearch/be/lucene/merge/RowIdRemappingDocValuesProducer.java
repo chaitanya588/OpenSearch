@@ -37,21 +37,18 @@ class RowIdRemappingDocValuesProducer extends DocValuesProducer {
 
     private final DocValuesProducer delegate;
     private final RowIdMapping rowIdMapping;
-    private final long generation;
     private final int maxDoc;
     private final int rowIdOffset;
 
     /**
      * @param delegate     the original doc values producer
-     * @param rowIdMapping the mapping from old to new row IDs, or null for sequential assignment
-     * @param generation   the writer generation of the source segment
+     * @param rowIdMapping the mapping from old to new row IDs for this generation, or null for sequential assignment
      * @param maxDoc       the maximum document count in the source segment
      * @param rowIdOffset  the starting row ID offset for sequential assignment (used when rowIdMapping is null)
      */
-    RowIdRemappingDocValuesProducer(DocValuesProducer delegate, RowIdMapping rowIdMapping, long generation, int maxDoc, int rowIdOffset) {
+    RowIdRemappingDocValuesProducer(DocValuesProducer delegate, RowIdMapping rowIdMapping, int maxDoc, int rowIdOffset) {
         this.delegate = delegate;
         this.rowIdMapping = rowIdMapping;
-        this.generation = generation;
         this.maxDoc = maxDoc;
         this.rowIdOffset = rowIdOffset;
     }
@@ -65,7 +62,7 @@ class RowIdRemappingDocValuesProducer extends DocValuesProducer {
     public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         if (DocumentInput.ROW_ID_FIELD.equals(field.name)) {
             if (rowIdMapping != null) {
-                return new MappedRowIdDocValues(delegate.getSortedNumeric(field), rowIdMapping, generation);
+                return new MappedRowIdDocValues(delegate.getSortedNumeric(field), rowIdMapping);
             } else {
                 // https://github.com/opensearch-project/OpenSearch/issues/21508
                 // TODO check how this will work for primary engine when rowIdMapping will be null.
@@ -112,18 +109,16 @@ class RowIdRemappingDocValuesProducer extends DocValuesProducer {
 
         private final SortedNumericDocValues delegate;
         private final RowIdMapping rowIdMapping;
-        private final long generation;
 
-        MappedRowIdDocValues(SortedNumericDocValues delegate, RowIdMapping rowIdMapping, long generation) {
+        MappedRowIdDocValues(SortedNumericDocValues delegate, RowIdMapping rowIdMapping) {
             this.delegate = delegate;
             this.rowIdMapping = rowIdMapping;
-            this.generation = generation;
         }
 
         @Override
         public long nextValue() throws IOException {
             long oldRowId = delegate.nextValue();
-            return rowIdMapping.getNewRowId(oldRowId, generation);
+            return rowIdMapping.getNewRowId(oldRowId);
         }
 
         @Override

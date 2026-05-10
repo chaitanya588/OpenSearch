@@ -52,16 +52,16 @@ public class CompositeMergeExecutor {
             FormatMergeResult primaryResult = mergeFormat(plan, plan.primaryFormat(), null);
             completed.add(primaryResult);
 
-            RowIdMapping mapping = plan.hasSecondaries()
-                ? primaryResult.rowIdMappingOpt()
-                    .orElseThrow(() -> new IllegalStateException("Primary merge did not produce row-ID mapping required by secondaries"))
+            Map<Long, RowIdMapping> mappings = plan.hasSecondaries()
+                ? primaryResult.rowIdMappingsOpt()
+                    .orElseThrow(() -> new IllegalStateException("Primary merge did not produce row-ID mappings required by secondaries"))
                 : null;
 
             for (DataFormat secondary : plan.secondaryFormats()) {
-                completed.add(mergeFormat(plan, secondary, mapping));
+                completed.add(mergeFormat(plan, secondary, mappings));
             }
 
-            return toMergeResult(completed, mapping);
+            return toMergeResult(completed, mappings);
         } catch (Exception e) {
             completed.forEach(FormatMergeResult::cleanup);
             if (e instanceof RuntimeException re) throw re;
@@ -69,22 +69,24 @@ public class CompositeMergeExecutor {
         }
     }
 
-    private FormatMergeResult mergeFormat(MergePlan plan, DataFormat format, RowIdMapping mapping) throws IOException {
+    private FormatMergeResult mergeFormat(MergePlan plan, DataFormat format, Map<Long, RowIdMapping> mappings) throws IOException {
         Merger merger = mergers.get(format);
         List<WriterFileSet> files = plan.filesFor(format);
         List<Segment> segments = new ArrayList<>();
         for (WriterFileSet wfs : files) {
             segments.add(Segment.builder(wfs.writerGeneration()).addSearchableFiles(format, wfs).build());
         }
-        MergeResult result = merger.merge(new MergeInput(segments, mapping, plan.mergedWriterGeneration()));
-        return new FormatMergeResult(format, result.getMergedWriterFileSetForDataformat(format), result.rowIdMapping().orElse(null));
+        MergeResult result = merger.merge(
+            MergeInput.builder().segments(segments).rowIdMappings(mappings).newWriterGeneration(plan.mergedWriterGeneration()).build()
+        );
+        return new FormatMergeResult(format, result.getMergedWriterFileSetForDataformat(format), result.rowIdMappings().orElse(null));
     }
 
-    private static MergeResult toMergeResult(List<FormatMergeResult> results, RowIdMapping mapping) {
+    private static MergeResult toMergeResult(List<FormatMergeResult> results, Map<Long, RowIdMapping> mappings) {
         Map<DataFormat, WriterFileSet> merged = new HashMap<>();
         for (FormatMergeResult r : results) {
             merged.put(r.format(), r.mergedFiles());
         }
-        return new MergeResult(merged, mapping);
+        return new MergeResult(merged, mappings);
     }
 }

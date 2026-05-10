@@ -29,19 +29,16 @@ import org.opensearch.index.engine.dataformat.RowIdMapping;
 class RowIdRemappingCodecReader extends FilterCodecReader {
 
     private final RowIdMapping rowIdMapping;
-    private final long generation;
     private final int rowIdOffset;
 
     /**
      * @param in           the source codec reader to wrap
-     * @param rowIdMapping the mapping from old to new row IDs, or null for sequential assignment
-     * @param generation   the writer generation of this segment
-     * @param rowIdOffset  the starting row ID offset for sequential assignment
+     * @param rowIdMapping the mapping from old to new row IDs for this segment's generation, or null for sequential assignment
+     * @param rowIdOffset  the starting row ID offset for sequential assignment (used when rowIdMapping is null)
      */
-    RowIdRemappingCodecReader(CodecReader in, RowIdMapping rowIdMapping, long generation, int rowIdOffset) {
+    RowIdRemappingCodecReader(CodecReader in, RowIdMapping rowIdMapping, int rowIdOffset) {
         super(in);
         this.rowIdMapping = rowIdMapping;
-        this.generation = generation;
         this.rowIdOffset = rowIdOffset;
     }
 
@@ -51,7 +48,7 @@ class RowIdRemappingCodecReader extends FilterCodecReader {
         if (delegate == null) {
             return null;
         }
-        return new RowIdRemappingDocValuesProducer(delegate, rowIdMapping, generation, in.maxDoc(), rowIdOffset);
+        return new RowIdRemappingDocValuesProducer(delegate, rowIdMapping, in.maxDoc(), rowIdOffset);
     }
 
     @Override

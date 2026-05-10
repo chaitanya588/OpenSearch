@@ -165,7 +165,7 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
         }
     }
 
-    //TODO: Ignoring internal lucene sort implementation for now and honour externally provided sort order.
+    // TODO: Ignoring internal lucene sort implementation for now and honour externally provided sort order.
     private boolean isIndexNeedToBeSortedInternally() {
         return false;
     }

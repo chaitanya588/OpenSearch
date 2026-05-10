@@ -96,9 +96,9 @@ public record FileInfos(Map<DataFormat, WriterFileSet> writerFilesMap, RowIdMapp
         }
 
         /**
-         * Sets the row ID mapping produced during sort-on-close.
+         * Sets the bidirectional row ID mapping produced during sort-on-close.
          *
-         * @param rowIdMapping the row ID mapping, or null
+         * @param rowIdMapping the bidirectional row ID mapping, or null
          * @return this builder
          */
         public Builder rowIdMapping(RowIdMapping rowIdMapping) {

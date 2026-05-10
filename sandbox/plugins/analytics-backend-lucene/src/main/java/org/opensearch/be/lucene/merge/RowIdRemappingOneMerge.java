@@ -17,6 +17,7 @@ import org.opensearch.index.engine.dataformat.RowIdMapping;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 import static org.opensearch.be.lucene.index.LuceneWriter.WRITER_GENERATION_ATTRIBUTE;
 
@@ -34,12 +35,12 @@ import static org.opensearch.be.lucene.index.LuceneWriter.WRITER_GENERATION_ATTR
 @ExperimentalApi
 class RowIdRemappingOneMerge extends MergePolicy.OneMerge {
 
-    private final RowIdMapping rowIdMapping;
+    private final Map<Long, RowIdMapping> rowIdMappings;
     private int nextRowIdOffset;
 
-    RowIdRemappingOneMerge(List<SegmentCommitInfo> segments, RowIdMapping rowIdMapping) {
+    RowIdRemappingOneMerge(List<SegmentCommitInfo> segments, Map<Long, RowIdMapping> rowIdMappings) {
         super(segments);
-        this.rowIdMapping = rowIdMapping;
+        this.rowIdMappings = rowIdMappings;
         this.nextRowIdOffset = 0;
     }
 
@@ -47,9 +48,10 @@ class RowIdRemappingOneMerge extends MergePolicy.OneMerge {
     public CodecReader wrapForMerge(CodecReader reader) throws IOException {
         CodecReader wrapped = super.wrapForMerge(reader);
         long generation = resolveGeneration(wrapped);
+        RowIdMapping mapping = rowIdMappings != null ? rowIdMappings.get(generation) : null;
         int offset = nextRowIdOffset;
         nextRowIdOffset += wrapped.maxDoc();
-        return new RowIdRemappingCodecReader(wrapped, rowIdMapping, generation, offset);
+        return new RowIdRemappingCodecReader(wrapped, mapping, offset);
     }
 
     private long resolveGeneration(CodecReader reader) {

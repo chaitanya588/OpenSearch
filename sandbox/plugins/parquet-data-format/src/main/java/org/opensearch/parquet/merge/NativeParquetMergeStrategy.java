@@ -81,7 +81,7 @@ public class NativeParquetMergeStrategy implements ParquetMergeStrategy {
             // Merge files in Rust
             MergeFilesResult merged = RustBridge.mergeParquetFilesInRust(filePaths, mergedFilePath.toString(), indexName);
             ParquetFileMetadata mergeMetadata = merged.metadata();
-            RowIdMapping rowIdMapping = merged.rowIdMapping();
+            Map<Long, RowIdMapping> rowIdMappings = merged.rowIdMappings();
 
             assert mergeMetadata.numRows() > 0 : "Merged file should contain at least one row";
 
@@ -102,7 +102,7 @@ public class NativeParquetMergeStrategy implements ParquetMergeStrategy {
             checksumUpdater.apply(mergedFileName, mergeMetadata.crc32(), mergeInput.newWriterGeneration());
             Map<DataFormat, WriterFileSet> mergedWriterFileSetMap = Collections.singletonMap(dataFormat, mergedWriterFileSet);
 
-            return new MergeResult(mergedWriterFileSetMap, rowIdMapping);
+            return new MergeResult(mergedWriterFileSetMap, rowIdMappings);
 
         } catch (Exception exception) {
             logger.error(() -> new ParameterizedMessage("Merge failed while creating merged file [{}]", mergedFilePath), exception);

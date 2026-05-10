@@ -14,21 +14,22 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.SortedNumericDocValues;
-import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.SortedNumericSortField;
+import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.opensearch.be.lucene.LuceneDataFormat;
-import org.opensearch.index.engine.dataformat.PackedSingleGenRowIdMapping;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.FlushInput;
+import org.opensearch.index.engine.dataformat.PackedRowIdMapping;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.mockito.Mockito.mock;
@@ -69,7 +70,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
 
         // Build a reverse sort permutation: old_row_id → new_row_id
         // Original order: 0, 1, 2, 3, 4
-        // Sorted order:   4, 3, 2, 1, 0  (reverse)
+        // Sorted order: 4, 3, 2, 1, 0 (reverse)
         long[] oldRowIds = { 0, 1, 2, 3, 4 };
         long[] newRowIds = { 4, 3, 2, 1, 0 };
         FlushInput sortedFlushInput = new FlushInput(buildMapping(oldRowIds, newRowIds));
@@ -90,8 +91,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             assertThat(wfs.writerGeneration(), equalTo(1L));
 
             // Read the sorted segment and verify doc order
-            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory()));
-                 IndexReader reader = DirectoryReader.open(dir)) {
+            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory())); IndexReader reader = DirectoryReader.open(dir)) {
 
                 assertThat(reader.numDocs(), equalTo(numDocs));
                 assertThat(reader.leaves().size(), equalTo(1));
@@ -106,11 +106,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
                 for (int docId = 0; docId < numDocs; docId++) {
                     assertTrue(rowIdDV.advanceExact(docId));
                     long rowIdValue = rowIdDV.nextValue();
-                    assertThat(
-                        "Doc at position " + docId + " should have sequential row_id " + docId,
-                        rowIdValue,
-                        equalTo((long) docId)
-                    );
+                    assertThat("Doc at position " + docId + " should have sequential row_id " + docId, rowIdValue, equalTo((long) docId));
                 }
             }
         }
@@ -144,8 +140,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             FileInfos fileInfos = writer.flush(sortedFlushInput);
             WriterFileSet wfs = fileInfos.getWriterFileSet(dataFormat).get();
 
-            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory()));
-                 IndexReader reader = DirectoryReader.open(dir)) {
+            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory())); IndexReader reader = DirectoryReader.open(dir)) {
 
                 LeafReader leaf = reader.leaves().get(0).reader();
                 SortedNumericDocValues rowIdDV = leaf.getSortedNumericDocValues(LuceneDocumentInput.ROW_ID_FIELD);
@@ -232,8 +227,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             WriterFileSet wfs = fileInfos.getWriterFileSet(dataFormat).get();
             assertThat(wfs.numRows(), equalTo((long) numDocs));
 
-            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory()));
-                 IndexReader reader = DirectoryReader.open(dir)) {
+            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory())); IndexReader reader = DirectoryReader.open(dir)) {
                 assertThat(reader.numDocs(), equalTo(numDocs));
                 assertThat(reader.leaves().size(), equalTo(1));
             }
@@ -259,8 +253,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             FileInfos fileInfos = writer.flush(FlushInput.EMPTY);
             WriterFileSet wfs = fileInfos.getWriterFileSet(dataFormat).get();
 
-            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory()));
-                 IndexReader reader = DirectoryReader.open(dir)) {
+            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory())); IndexReader reader = DirectoryReader.open(dir)) {
 
                 LeafReader leaf = reader.leaves().get(0).reader();
                 SortedNumericDocValues rowIdDV = leaf.getSortedNumericDocValues(LuceneDocumentInput.ROW_ID_FIELD);
@@ -303,8 +296,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             WriterFileSet wfs = fileInfos.getWriterFileSet(dataFormat).get();
             assertThat(wfs.numRows(), equalTo((long) numDocs));
 
-            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory()));
-                 IndexReader reader = DirectoryReader.open(dir)) {
+            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory())); IndexReader reader = DirectoryReader.open(dir)) {
 
                 assertThat(reader.numDocs(), equalTo(numDocs));
                 assertThat(reader.leaves().size(), equalTo(1));
@@ -318,8 +310,10 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
                 for (int docId = 0; docId < numDocs; docId++) {
                     assertTrue(ageDV.advanceExact(docId));
                     long ageValue = ageDV.nextValue();
-                    assertTrue("age values should be in ascending order, got " + ageValue + " after " + previousAge,
-                        ageValue >= previousAge);
+                    assertTrue(
+                        "age values should be in ascending order, got " + ageValue + " after " + previousAge,
+                        ageValue >= previousAge
+                    );
                     previousAge = ageValue;
                 }
             }
@@ -349,8 +343,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             FileInfos fileInfos = writer.flush(FlushInput.EMPTY);
             WriterFileSet wfs = fileInfos.getWriterFileSet(dataFormat).get();
 
-            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory()));
-                 IndexReader reader = DirectoryReader.open(dir)) {
+            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory())); IndexReader reader = DirectoryReader.open(dir)) {
 
                 LeafReader leaf = reader.leaves().get(0).reader();
                 SortedNumericDocValues rowIdDV = leaf.getSortedNumericDocValues(LuceneDocumentInput.ROW_ID_FIELD);
@@ -390,8 +383,7 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
             FileInfos fileInfos = writer.flush(FlushInput.EMPTY);
             WriterFileSet wfs = fileInfos.getWriterFileSet(dataFormat).get();
 
-            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory()));
-                 IndexReader reader = DirectoryReader.open(dir)) {
+            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory())); IndexReader reader = DirectoryReader.open(dir)) {
 
                 LeafReader leaf = reader.leaves().get(0).reader();
                 SortedNumericDocValues rowIdDV = leaf.getSortedNumericDocValues(LuceneDocumentInput.ROW_ID_FIELD);
@@ -406,7 +398,118 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
         }
     }
 
-    private static PackedSingleGenRowIdMapping buildMapping(long[] oldRowIds, long[] newRowIds) {
+    /**
+     * Tests the multi-segment scenario: uses a tiny RAM buffer to force the IndexWriter
+     * to create multiple internal segments (simulating what happens when many docs are
+     * written and Lucene flushes internally). Then verifies that forceMerge with
+     * ReorderingMergePolicy correctly reorders all docs across segments in one pass.
+     *
+     * This simulates: Parquet has 1 sorted file with 700 docs, Lucene has 2+ segments.
+     * The sort permutation must correctly apply across the merged result.
+     */
+    public void testSortedFlushWithMultipleInternalSegments() throws IOException {
+        Path baseDir = createTempDir();
+        int numDocs = 700;
+        MappedFieldType textField = mockTextField("content");
+
+        // Build a reverse permutation: doc at original position i goes to position (numDocs - 1 - i)
+        long[] oldRowIds = new long[numDocs];
+        long[] newRowIds = new long[numDocs];
+        for (int i = 0; i < numDocs; i++) {
+            oldRowIds[i] = i;
+            newRowIds[i] = numDocs - 1 - i;
+        }
+        FlushInput sortedFlushInput = new FlushInput(buildMapping(oldRowIds, newRowIds));
+
+        // Use a tiny RAM buffer to force multiple internal segment flushes
+        try (LuceneWriter writer = new LuceneWriter(1L, dataFormat, baseDir, null, Codec.getDefault(), null)) {
+            writer.setRAMBufferSizeMB(0.001);
+            for (int i = 0; i < numDocs; i++) {
+                LuceneDocumentInput input = new LuceneDocumentInput();
+                input.addField(textField, "doc_" + i);
+                input.setRowId(LuceneDocumentInput.ROW_ID_FIELD, i);
+                writer.addDoc(input);
+            }
+
+            FileInfos fileInfos = writer.flush(sortedFlushInput);
+            assertTrue(fileInfos.getWriterFileSet(dataFormat).isPresent());
+
+            WriterFileSet wfs = fileInfos.getWriterFileSet(dataFormat).get();
+            assertThat(wfs.numRows(), equalTo((long) numDocs));
+
+            // Read the sorted segment and verify:
+            // 1. Exactly 1 segment after forceMerge
+            // 2. Row IDs are sequential 0..N (rewritten by LuceneWriterCodec)
+            try (NIOFSDirectory dir = new NIOFSDirectory(Path.of(wfs.directory())); IndexReader reader = DirectoryReader.open(dir)) {
+
+                assertThat("Should have exactly 1 segment after forceMerge", reader.leaves().size(), equalTo(1));
+                assertThat(reader.numDocs(), equalTo(numDocs));
+
+                LeafReader leaf = reader.leaves().get(0).reader();
+                SortedNumericDocValues rowIdDV = leaf.getSortedNumericDocValues(LuceneDocumentInput.ROW_ID_FIELD);
+                assertNotNull("___row_id doc values should exist in sorted segment", rowIdDV);
+
+                // After reorder + row ID rewrite: docs are physically reordered,
+                // and __row_id__ values are rewritten to sequential 0..N.
+                for (int docId = 0; docId < numDocs; docId++) {
+                    assertTrue(rowIdDV.advanceExact(docId));
+                    long rowIdValue = rowIdDV.nextValue();
+                    assertThat("Doc at position " + docId + " should have sequential row_id " + docId, rowIdValue, equalTo((long) docId));
+                }
+            }
+        }
+    }
+
+    /**
+     * ReorderingOneMerge rejects a RowIdMapping that does not support reverse lookup.
+     */
+    public void testReorderingOneMergeRejectsForwardOnlyMapping() throws IOException {
+        long[] oldToNew = { 2, 0, 1 };
+        PackedRowIdMapping forwardOnly = new PackedRowIdMapping(oldToNew, false);
+
+        Path tempDir = createTempDir();
+        try (Directory directory = new NIOFSDirectory(tempDir)) {
+            // Create a minimal segment to satisfy OneMerge's non-empty requirement
+            org.apache.lucene.index.IndexWriterConfig iwc = new org.apache.lucene.index.IndexWriterConfig();
+            try (org.apache.lucene.index.IndexWriter iw = new org.apache.lucene.index.IndexWriter(directory, iwc)) {
+                iw.addDocument(new org.apache.lucene.document.Document());
+                iw.commit();
+            }
+            org.apache.lucene.index.SegmentInfos infos = org.apache.lucene.index.SegmentInfos.readLatestCommit(directory);
+            List<org.apache.lucene.index.SegmentCommitInfo> segments = infos.asList();
+
+            IllegalArgumentException ex = expectThrows(
+                IllegalArgumentException.class,
+                () -> new LuceneWriter.ReorderingOneMerge(segments, forwardOnly)
+            );
+            assertTrue(ex.getMessage().contains("newToOld"));
+        }
+    }
+
+    /**
+     * ReorderingOneMerge accepts a RowIdMapping that supports reverse lookup.
+     */
+    public void testReorderingOneMergeAcceptsBidirectionalMapping() throws IOException {
+        long[] oldToNew = { 2, 0, 1 };
+        PackedRowIdMapping bidirectional = new PackedRowIdMapping(oldToNew, true);
+
+        Path tempDir = createTempDir();
+        try (Directory directory = new NIOFSDirectory(tempDir)) {
+            org.apache.lucene.index.IndexWriterConfig iwc = new org.apache.lucene.index.IndexWriterConfig();
+            try (org.apache.lucene.index.IndexWriter iw = new org.apache.lucene.index.IndexWriter(directory, iwc)) {
+                iw.addDocument(new org.apache.lucene.document.Document());
+                iw.commit();
+            }
+            org.apache.lucene.index.SegmentInfos infos = org.apache.lucene.index.SegmentInfos.readLatestCommit(directory);
+            List<org.apache.lucene.index.SegmentCommitInfo> segments = infos.asList();
+
+            // Should not throw
+            LuceneWriter.ReorderingOneMerge merge = new LuceneWriter.ReorderingOneMerge(segments, bidirectional);
+            assertNotNull(merge);
+        }
+    }
+
+    private static PackedRowIdMapping buildMapping(long[] oldRowIds, long[] newRowIds) {
         int numDocs = oldRowIds.length;
         long[] oldToNew = new long[numDocs];
         for (int i = 0; i < numDocs; i++) {
@@ -415,6 +518,6 @@ public class LuceneWriterSortedFlushTests extends OpenSearchTestCase {
         for (int i = 0; i < oldRowIds.length; i++) {
             oldToNew[(int) oldRowIds[i]] = newRowIds[i];
         }
-        return new PackedSingleGenRowIdMapping(oldToNew);
+        return new PackedRowIdMapping(oldToNew, true);
     }
 }

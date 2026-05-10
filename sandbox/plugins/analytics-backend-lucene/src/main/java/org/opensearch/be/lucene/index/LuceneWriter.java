@@ -46,7 +46,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Per-generation Lucene writer that creates segments in an isolated temporary directory.
@@ -131,6 +130,15 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
 
         iwc.setCodec(new LuceneWriterCodec(codec, writerGeneration));
         this.indexWriter = new IndexWriter(directory, iwc);
+    }
+
+    /**
+     * Overrides the RAM buffer size on the underlying IndexWriter.
+     * Package-private for testing — allows forcing intermediate segment flushes
+     * to create multiple segments within a single writer.
+     */
+    void setRAMBufferSizeMB(double ramBufferSizeMB) {
+        indexWriter.getConfig().setRAMBufferSizeMB(ramBufferSizeMB);
     }
 
     /**
@@ -224,7 +232,6 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
             }
         }
 
-
         return FileInfos.builder().putWriterFileSet(dataFormat, wfsBuilder.build()).build();
     }
 
@@ -317,7 +324,12 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         }
 
         @Override
-        public MergeSpecification findForcedMerges(SegmentInfos segmentInfos, int maxSegmentCount, Map<SegmentCommitInfo, Boolean> segmentsToMerge, MergeContext mergeContext) {
+        public MergeSpecification findForcedMerges(
+            SegmentInfos segmentInfos,
+            int maxSegmentCount,
+            Map<SegmentCommitInfo, Boolean> segmentsToMerge,
+            MergeContext mergeContext
+        ) {
             if (reorderDone) {
                 return null; // already reordered, stop the loop
             }
@@ -351,6 +363,9 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
 
         ReorderingOneMerge(List<SegmentCommitInfo> segments, RowIdMapping mapping) {
             super(segments);
+            if (mapping.isNewToOldSupported() == false) {
+                throw new IllegalArgumentException("RowIdMapping must support newToOld for merge reordering");
+            }
             this.mapping = mapping;
         }
 
@@ -359,12 +374,12 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
             return new Sorter.DocMap() {
                 @Override
                 public int oldToNew(int docID) {
-                    return mapping.oldToNew(docID);
+                    return (int) mapping.getNewRowId(docID);
                 }
 
                 @Override
                 public int newToOld(int docID) {
-                    return mapping.newToOld(docID);
+                    return (int) mapping.newToOld(docID);
                 }
 
                 @Override
