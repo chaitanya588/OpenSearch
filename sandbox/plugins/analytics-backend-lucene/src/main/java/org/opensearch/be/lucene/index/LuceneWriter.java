@@ -186,6 +186,14 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
             return FileInfos.empty();
         }
 
+        long flushStartNanos = System.nanoTime();
+        logger.info(
+            "flush: START generation={}, docCount={}, hasRowIdMapping={}",
+            writerGeneration,
+            docCount,
+            flushInput.hasRowIdMapping()
+        );
+
         // If sort permutation is provided, configure the reorder merge policy
         if (flushInput.hasRowIdMapping()) {
             RowIdMapping mapping = flushInput.rowIdMapping();
@@ -204,8 +212,20 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         }
 
         // Common path: forceMerge to 1 segment, commit, build FileInfos
+        long forceMergeStartNanos = System.nanoTime();
         indexWriter.forceMerge(1, true);
+        long forceMergeDurationMs = (System.nanoTime() - forceMergeStartNanos) / 1_000_000;
+        logger.info(
+            "flush: forceMerge complete: generation={}, docCount={}, duration={}ms",
+            writerGeneration,
+            docCount,
+            forceMergeDurationMs
+        );
+
+        long commitStartNanos = System.nanoTime();
         indexWriter.commit();
+        long commitDurationMs = (System.nanoTime() - commitStartNanos) / 1_000_000;
+        logger.info("flush: commit complete: generation={}, duration={}ms", writerGeneration, commitDurationMs);
 
         // Close the IndexWriter before rewriting segment metadata.
         // This prevents IndexFileDeleter from removing our rewritten segments_N
@@ -241,6 +261,15 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
             }
         }
 
+        long totalFlushDurationMs = (System.nanoTime() - flushStartNanos) / 1_000_000;
+        logger.info(
+            "flush: DONE generation={}, totalRows={}, forceMerge={}ms, commit={}ms, total={}ms",
+            writerGeneration,
+            docCount,
+            forceMergeDurationMs,
+            commitDurationMs,
+            totalFlushDurationMs
+        );
 
         return FileInfos.builder().putWriterFileSet(dataFormat, wfsBuilder.build()).build();
     }

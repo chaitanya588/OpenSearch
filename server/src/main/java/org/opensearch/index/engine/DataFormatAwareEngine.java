@@ -528,7 +528,7 @@ public class DataFormatAwareEngine implements Indexer {
                     assert index.seqNo() >= 0 : "ops should have an assigned seq no.; origin: " + index.origin();
 
                     if (plan.executeOpOnEngine) {
-                        logger.debug(
+                        logger.trace(
                             "Indexing doc id=[{}] seqNo=[{}] primaryTerm=[{}] — writing to engine",
                             index.id(),
                             index.seqNo(),

@@ -84,7 +84,7 @@ impl NativeSettings {
     }
 
     pub fn get_sort_batch_size(&self) -> usize {
-        self.sort_batch_size.unwrap_or(8192)
+        self.sort_batch_size.unwrap_or(32768)
     }
 
     pub fn get_merge_batch_size(&self) -> usize {

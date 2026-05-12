@@ -15,6 +15,7 @@ import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.task.AnalyticsShardTask;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.inject.Singleton;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -53,22 +54,18 @@ public class AnalyticsSearchTransportService {
 
     @Inject
     public AnalyticsSearchTransportService(
-        StreamTransportService streamTransportService,
+        @Nullable StreamTransportService streamTransportService,
         ClusterService clusterService,
         AnalyticsSearchService searchService,
         IndicesService indicesService,
         TaskResourceTrackingService taskResourceTrackingService
     ) {
-        if (streamTransportService == null) {
-            throw new IllegalStateException(
-                "analytics-engine requires the STREAM_TRANSPORT feature flag to be enabled "
-                    + "(opensearch.experimental.feature.stream_transport.enabled=true)"
-            );
-        }
         searchService.setTaskResourceTrackingService(taskResourceTrackingService);
         this.transportService = streamTransportService;
         this.clusterService = clusterService;
-        registerStreamingFragmentHandler(this.transportService, searchService, indicesService);
+        if (streamTransportService != null) {
+            registerStreamingFragmentHandler(this.transportService, searchService, indicesService);
+        }
     }
 
     private static void registerStreamingFragmentHandler(
@@ -105,6 +102,11 @@ public class AnalyticsSearchTransportService {
     }
 
     Transport.Connection getConnection(String clusterAlias, String nodeId) {
+        if (transportService == null) {
+            throw new IllegalStateException(
+                "analytics-engine streaming is unavailable: STREAM_TRANSPORT feature flag is not enabled"
+            );
+        }
         DiscoveryNode node = clusterService.state().nodes().get(nodeId);
         return transportService.getConnection(node);
     }
