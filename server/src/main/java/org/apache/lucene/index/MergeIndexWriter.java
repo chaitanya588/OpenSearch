@@ -8,6 +8,8 @@
 
 package org.apache.lucene.index;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.Directory;
 
 import java.io.IOException;
@@ -45,6 +47,7 @@ import java.io.IOException;
  */
 public class MergeIndexWriter extends IndexWriter {
 
+    private static final Logger logger = LogManager.getLogger(MergeIndexWriter.class);
     public MergeIndexWriter(Directory d, IndexWriterConfig conf) throws IOException {
         super(d, conf);
     }
@@ -83,7 +86,12 @@ public class MergeIndexWriter extends IndexWriter {
         // Refresh-lock acquisition happens inside the MergedSegmentWarmer configured on this writer,
         // which fires between mergeMiddle and commitMerge while the IW monitor is not held. This
         // matches the refresh path's lock order (refreshLock → IW monitor) and avoids any inversion.
-        merge(oneMerge);
+        try {
+            merge(oneMerge);
+        } catch (Throwable throwable) {
+            logger.error("Encountered critical exception in merge flow:", throwable);
+            logger.error("Retrieving tragic exception:", this.getTragicException());
+        }
     }
 
     @Override

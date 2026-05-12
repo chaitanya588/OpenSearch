@@ -224,6 +224,7 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
         // The segment is always sorted by __row_id__ — either naturally (docs
         // written sequentially) or via OneMerge.reorder() + row ID rewrite.
         if (segmentInfo.info.getIndexSort() == null) {
+            logger.info("Overriding segment info manually");
             rewriteSegmentInfoWithSort(segmentInfos, segmentInfo);
         }
 
