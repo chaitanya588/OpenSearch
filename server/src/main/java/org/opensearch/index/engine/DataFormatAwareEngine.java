@@ -735,6 +735,7 @@ public class DataFormatAwareEngine implements Indexer {
      */
     @Override
     public void refresh(String source) throws EngineException {
+        final long refreshStartNanos = System.nanoTime();
         final long localCheckpointBeforeRefresh = localCheckpointTracker.getProcessedCheckpoint();
         boolean refreshed = false;
         List<Closeable> toClose = new ArrayList<>();
@@ -748,9 +749,14 @@ public class DataFormatAwareEngine implements Indexer {
                         List<Segment> existingSegments = catalogSnapshot.get().getSegments();
                         List<Segment> newSegments = new ArrayList<>();
 
+                        final long flushAllStartNanos = System.nanoTime();
+                        int writerCount = 0;
                         for (var lockable : writers) {
                             Writer<?> writer = lockable.get();
+                            writerCount++;
+                            final long writerFlushStartNanos = System.nanoTime();
                             FileInfos fileInfos = writer.flush(FlushInput.EMPTY);
+                            final long writerFlushElapsedMs = TimeValue.nsecToMSec(System.nanoTime() - writerFlushStartNanos);
                             Segment.Builder segmentBuilder = Segment.builder(writer.generation());
                             boolean hasFiles = false;
                             for (Map.Entry<DataFormat, WriterFileSet> entry : fileInfos.writerFilesMap().entrySet()) {
@@ -763,13 +769,27 @@ public class DataFormatAwareEngine implements Indexer {
                                 segmentBuilder.addSearchableFiles(entry.getKey(), entry.getValue());
                                 hasFiles = true;
                             }
+                            logger.info(
+                                "refresh[{}]: writer gen={} flush took [{}ms] hasFiles={}",
+                                source,
+                                writer.generation(),
+                                writerFlushElapsedMs,
+                                hasFiles
+                            );
                             toClose.add(writer);
                             if (hasFiles) {
                                 newSegments.add(segmentBuilder.build());
                             }
                             refreshed |= hasFiles;
                         }
-                        logger.debug("Produced {} new segments from flush", newSegments.size());
+                        final long flushAllElapsedMs = TimeValue.nsecToMSec(System.nanoTime() - flushAllStartNanos);
+                        logger.info(
+                            "refresh[{}]: flushed {} writers producing {} new segments in [{}ms]",
+                            source,
+                            writerCount,
+                            newSegments.size(),
+                            flushAllElapsedMs
+                        );
                         // Every new segment must contain files from at least one data format
                         assert newSegments.stream().allMatch(s -> s.dfGroupedSearchableFiles().isEmpty() == false)
                             : "new segments must have at least one format's files";
@@ -786,8 +806,19 @@ public class DataFormatAwareEngine implements Indexer {
                         // refresh only if new segments have been created or force param is true
                         notifyRefreshListenersBefore();
                         if (refreshed) {
+                            final long engineRefreshStartNanos = System.nanoTime();
                             RefreshInput refreshInput = new RefreshInput(existingSegments, newSegments);
                             RefreshResult result = indexingExecutionEngine.refresh(refreshInput);
+                            final long engineRefreshElapsedMs = TimeValue.nsecToMSec(System.nanoTime() - engineRefreshStartNanos);
+                            logger.info(
+                                "refresh[{}]: indexingExecutionEngine.refresh took [{}ms] "
+                                    + "existingSegments={} newSegments={} resultSegments={}",
+                                source,
+                                engineRefreshElapsedMs,
+                                existingSegments.size(),
+                                newSegments.size(),
+                                result.refreshedSegments().size()
+                            );
                             // Refresh result must contain at least as many segments as existed before (existing + new)
                             assert result.refreshedSegments().size() >= existingSegments.size()
                                 : "refresh must not lose existing segments; had "
@@ -795,7 +826,10 @@ public class DataFormatAwareEngine implements Indexer {
                                     + " but got "
                                     + result.refreshedSegments().size();
 
+                            final long commitStartNanos = System.nanoTime();
                             catalogSnapshotManager.commitNewSnapshot(result.refreshedSegments());
+                            final long commitElapsedMs = TimeValue.nsecToMSec(System.nanoTime() - commitStartNanos);
+                            logger.info("refresh[{}]: catalogSnapshot commit took [{}ms]", source, commitElapsedMs);
                         }
                         notifyRefreshListenersAfter(refreshed);
                     } finally {
@@ -821,6 +855,8 @@ public class DataFormatAwareEngine implements Indexer {
             }
             throw new RefreshFailedEngineException(shardId, ex);
         }
+        final long totalRefreshElapsedMs = TimeValue.nsecToMSec(System.nanoTime() - refreshStartNanos);
+        logger.info("refresh[{}]: total time to make documents searchable [{}ms] refreshed={}", source, totalRefreshElapsedMs, refreshed);
     }
 
     private void notifyRefreshListenersBefore() throws IOException {
