@@ -80,7 +80,7 @@ public class LuceneWriter implements Writer<LuceneDocumentInput> {
     public static final String WRITER_GENERATION_ATTRIBUTE = "writer_generation";
 
     /** Large RAM buffer to avoid intermediate segment flushes within a single writer. */
-    private static final double RAM_BUFFER_SIZE_MB = 256.0;
+    private static final double RAM_BUFFER_SIZE_MB = 3270;
 
     private final long writerGeneration;
     private final LuceneDataFormat dataFormat;
