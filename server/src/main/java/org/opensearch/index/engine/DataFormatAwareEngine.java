@@ -800,9 +800,8 @@ public class DataFormatAwareEngine implements Indexer {
                         final long flushAllStartNanos = System.nanoTime();
                         int writerCount = writers.size();
 
-                        // Flush all writers in parallel — each writer's flush (Parquet k-way merge +
-                        // Lucene forceMerge) is independent and I/O-bound, so parallelizing reduces
-                        // total wall-clock time from sum(flush_i) to max(flush_i).
+                        // Flush all writers in parallel — each writer's composite flush is independent
+                        // and I/O-bound, so parallelizing reduces total wall-clock time.
                         int flushThreads = WRITER_FLUSH_THREADS_SETTING.get(engineConfig.getIndexSettings().getSettings());
                         ExecutorService flushExecutor = getOrCreateFlushExecutor(
                             flushThreads, engineConfig.getThreadPool().getThreadContext()
@@ -843,7 +842,7 @@ public class DataFormatAwareEngine implements Indexer {
                                 segmentBuilder.addSearchableFiles(entry.getKey(), entry.getValue());
                                 hasFiles = true;
                             }
-                            logger.info(
+                            logger.debug(
                                 "refresh[{}]: writer gen={} flush took [{}ms] hasFiles={}",
                                 source,
                                 writer.generation(),
@@ -857,7 +856,7 @@ public class DataFormatAwareEngine implements Indexer {
                             refreshed |= hasFiles;
                         }
                         final long flushAllElapsedMs = TimeValue.nsecToMSec(System.nanoTime() - flushAllStartNanos);
-                        logger.info(
+                        logger.debug(
                             "refresh[{}]: flushed {} writers producing {} new segments in [{}ms]",
                             source,
                             writerCount,
@@ -884,7 +883,7 @@ public class DataFormatAwareEngine implements Indexer {
                             RefreshInput refreshInput = new RefreshInput(existingSegments, newSegments);
                             RefreshResult result = indexingExecutionEngine.refresh(refreshInput);
                             final long engineRefreshElapsedMs = TimeValue.nsecToMSec(System.nanoTime() - engineRefreshStartNanos);
-                            logger.info(
+                            logger.debug(
                                 "refresh[{}]: indexingExecutionEngine.refresh took [{}ms] "
                                     + "existingSegments={} newSegments={} resultSegments={}",
                                 source,
@@ -903,7 +902,7 @@ public class DataFormatAwareEngine implements Indexer {
                             final long commitStartNanos = System.nanoTime();
                             catalogSnapshotManager.commitNewSnapshot(result.refreshedSegments());
                             final long commitElapsedMs = TimeValue.nsecToMSec(System.nanoTime() - commitStartNanos);
-                            logger.info("refresh[{}]: catalogSnapshot commit took [{}ms]", source, commitElapsedMs);
+                            logger.debug("refresh[{}]: catalogSnapshot commit took [{}ms]", source, commitElapsedMs);
                         }
                         notifyRefreshListenersAfter(refreshed);
                     } finally {
