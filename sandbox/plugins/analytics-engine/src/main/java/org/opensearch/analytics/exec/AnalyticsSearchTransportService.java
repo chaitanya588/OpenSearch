@@ -15,6 +15,7 @@ import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.task.AnalyticsShardTask;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.inject.Singleton;
 import org.opensearch.common.util.FeatureFlags;
@@ -54,7 +55,7 @@ public class AnalyticsSearchTransportService {
 
     @Inject
     public AnalyticsSearchTransportService(
-        StreamTransportService streamTransportService,
+        @Nullable StreamTransportService streamTransportService,
         ClusterService clusterService,
         AnalyticsSearchService searchService,
         IndicesService indicesService,
@@ -71,7 +72,9 @@ public class AnalyticsSearchTransportService {
         searchService.setTaskResourceTrackingService(taskResourceTrackingService);
         this.transportService = streamTransportService;
         this.clusterService = clusterService;
-        registerStreamingFragmentHandler(this.transportService, searchService, indicesService);
+        if (streamTransportService != null) {
+            registerStreamingFragmentHandler(this.transportService, searchService, indicesService);
+        }
     }
 
     private static void registerStreamingFragmentHandler(
@@ -108,6 +111,11 @@ public class AnalyticsSearchTransportService {
     }
 
     Transport.Connection getConnection(String clusterAlias, String nodeId) {
+        if (transportService == null) {
+            throw new IllegalStateException(
+                "analytics-engine streaming is unavailable: STREAM_TRANSPORT feature flag is not enabled"
+            );
+        }
         DiscoveryNode node = clusterService.state().nodes().get(nodeId);
         return transportService.getConnection(node);
     }
