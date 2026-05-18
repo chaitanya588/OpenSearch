@@ -617,17 +617,6 @@ public class DataFormatAwareEngine implements Indexer {
                     + "] must match operation seq no ["
                     + index.seqNo()
                     + "]";
-
-                // Flush-on-addDoc: if this writer has exceeded the per-writer doc count
-                // threshold, flush it inline on the indexing thread (like Lucene does
-                // internally). This prevents writers from growing unboundedly between
-                // refresh cycles and distributes flush work across indexing threads.
-                if (currentWriter instanceof RowIdAwareWriter<?> rowIdWriter
-                    && rowIdWriter.docCount() >= maxDocsPerWriter) {
-                    maybeFlushWriter(lockedWriter);
-                    lockedWriter = null; // prevent double-release in finally
-                    currentWriter = null;
-                }
             } else {
                 WriteResult.Failure f = (WriteResult.Failure) result;
                 indexResult = new Engine.IndexResult(f.cause(), plan.version, index.primaryTerm(), index.seqNo());
@@ -635,7 +624,7 @@ public class DataFormatAwareEngine implements Indexer {
         } catch (Exception e) {
             indexResult = new Engine.IndexResult(e, plan.version, index.primaryTerm(), index.seqNo());
         } finally {
-            if (lockedWriter != null && currentWriter != null) {
+            if (currentWriter != null) {
                 writerPool.releaseAndUnlock(lockedWriter);
             }
         }
