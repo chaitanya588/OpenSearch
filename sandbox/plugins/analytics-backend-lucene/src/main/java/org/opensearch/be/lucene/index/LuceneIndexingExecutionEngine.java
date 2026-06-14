@@ -23,12 +23,14 @@ import org.apache.lucene.misc.store.HardlinkCopyDirectoryWrapper;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.MMapDirectory;
+import org.apache.lucene.store.NativeFSLockFactory;
 import org.opensearch.be.lucene.LuceneDataFormat;
 import org.opensearch.be.lucene.LuceneFieldFactoryRegistry;
 import org.opensearch.be.lucene.LuceneReader;
 import org.opensearch.be.lucene.merge.LuceneMerger;
 import org.opensearch.be.lucene.stats.LuceneShardStatsTracker;
 import org.opensearch.be.lucene.stats.LuceneStatsProvider;
+import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.index.engine.dataformat.DataFormat;
@@ -47,6 +49,7 @@ import org.opensearch.index.store.Store;
 import org.opensearch.plugin.stats.DataFormatStatsProviderRegistry;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -130,10 +133,13 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
         // Create the lucene subdirectory if it doesn't exist, or clear stale contents
         // from a prior engine lifecycle. Any data here is either already hardlinked into
         // index/ (via addIndexes) or will be replayed from the translog on recovery.
+        // Before deleting, release any stale NativeFSLock entries left in Lucene's static
+        // LOCK_HELD set from a prior engine that failed to close its writers properly.
         boolean registered = false;
         LuceneStatsProvider provider = null;
         try {
             if (Files.isDirectory(baseDirectory)) {
+                clearStaleLocks(baseDirectory);
                 tryDeleteDirectory(baseDirectory);
             }
             try {
@@ -453,6 +459,59 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
             provider.unregister(store.shardId());
         }
         // LuceneCommitter owns the shared IndexWriter lifecycle
+    }
+
+    /**
+     * Best-effort removal of stale NativeFSLock entries from Lucene's static LOCK_HELD set.
+     * A prior engine that failed to close its writers leaves paths in this JVM-level set.
+     * On engine restart the generation counter can produce the same value, causing
+     * LockObtainFailedException. This method removes any entries under this shard's
+     * lucene base directory so the new engine can reuse those generations.
+     */
+    /**
+     * Removes stale NativeFSLock entries from Lucene's static LOCK_HELD set.
+     * Uses reflection on {@code NativeFSLockFactory.LOCK_HELD} (a private static
+     * {@code Set<String>}) — tied to Lucene 10.x. If Lucene changes this field,
+     * reflection fails with a WARN log so the incompatibility is caught during testing.
+     */
+    @SuppressWarnings("unchecked")
+    @SuppressForbidden(reason = "Clear stale lock entries leaked by a prior engine lifecycle")
+    private static void clearStaleLocks(Path baseDirectory) {
+        Set<String> lockHeld;
+        try {
+            Field field = NativeFSLockFactory.class.getDeclaredField("LOCK_HELD");
+            field.setAccessible(true);
+            lockHeld = (Set<String>) field.get(null);
+        } catch (Exception e) {
+            logger.warn(
+                "Cannot access NativeFSLockFactory.LOCK_HELD via reflection — "
+                    + "stale lock cleanup disabled. Check Lucene version compatibility.",
+                e
+            );
+            return;
+        }
+        try {
+            Path realBase = baseDirectory.toRealPath();
+            int removed = 0;
+            synchronized (lockHeld) {
+                for (var it = lockHeld.iterator(); it.hasNext();) {
+                    Path lockPath = Path.of(it.next());
+                    if (lockPath.startsWith(realBase)) {
+                        it.remove();
+                        removed++;
+                    }
+                }
+            }
+            if (removed > 0) {
+                logger.warn(
+                    "Cleared {} stale NativeFSLock entries under [{}]. " + "A prior engine failed to close its LuceneWriters properly.",
+                    removed,
+                    realBase
+                );
+            }
+        } catch (IOException e) {
+            logger.warn("Failed to resolve base directory [{}] for stale lock cleanup: {}", baseDirectory, e.getMessage());
+        }
     }
 
     /**
