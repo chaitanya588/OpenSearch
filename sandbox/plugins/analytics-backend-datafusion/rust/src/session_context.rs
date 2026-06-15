@@ -157,6 +157,7 @@ pub async unsafe fn create_session_context(
     );
 
     let mut runtime_env_builder = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .with_object_store_registry(Arc::new(datafusion::execution::object_store::DefaultObjectStoreRegistry::new()))
         .with_cache_manager(
             CacheManagerConfig::default()
                 .with_list_files_cache(Some(list_file_cache))
@@ -753,5 +754,54 @@ mod tests {
             .expect("widened query executes without stats-merge failure");
         let total: usize = rows.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 2, "widened scan must read both files");
+    }
+
+    /// Each per-query RuntimeEnv built the way create_session_context builds it must get its own
+    /// ObjectStoreRegistry. Two queries registering different stores under the bare `file://`
+    /// scheme must not clobber each other — the bug that routed one shard's parquet read through
+    /// another shard's store and failed with "No such file or directory".
+    #[tokio::test]
+    async fn test_per_query_object_store_registry_is_isolated() {
+        use datafusion::execution::object_store::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
+        use object_store::memory::InMemory;
+        use object_store::ObjectStore;
+        use url::Url;
+
+        // Simulates the single shared global runtime_env (DataFusionRuntime.runtime_env).
+        let shared = RuntimeEnvBuilder::new().build().expect("shared runtime env");
+
+        // Two per-query runtime envs, each derived the way create_session_context derives them:
+        // from the shared env but with a fresh object-store registry.
+        let env_a = RuntimeEnvBuilder::from_runtime_env(&shared)
+            .with_object_store_registry(Arc::new(DefaultObjectStoreRegistry::new()))
+            .build()
+            .expect("per-query runtime env a");
+        let env_b = RuntimeEnvBuilder::from_runtime_env(&shared)
+            .with_object_store_registry(Arc::new(DefaultObjectStoreRegistry::new()))
+            .build()
+            .expect("per-query runtime env b");
+
+        let file_url = Url::parse("file://").unwrap();
+        let store_a: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store_b: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+
+        // Each query registers its own shard store under the same bare file:// scheme.
+        env_a.register_object_store(&file_url, Arc::clone(&store_a));
+        env_b.register_object_store(&file_url, Arc::clone(&store_b));
+
+        let got_a = env_a
+            .object_store_registry
+            .get_store(&file_url)
+            .expect("env_a must resolve a file:// store");
+        let got_b = env_b
+            .object_store_registry
+            .get_store(&file_url)
+            .expect("env_b must resolve a file:// store");
+
+        // Each env resolves to its OWN store, and the two are independent: registering in one env
+        // does not leak into the other.
+        assert!(Arc::ptr_eq(&got_a, &store_a), "env_a must resolve to its own store");
+        assert!(Arc::ptr_eq(&got_b, &store_b), "env_b must resolve to its own store");
+        assert!(!Arc::ptr_eq(&got_a, &got_b), "per-query stores must be independent across queries");
     }
 }

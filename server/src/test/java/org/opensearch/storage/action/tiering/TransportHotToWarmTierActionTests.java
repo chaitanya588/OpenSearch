@@ -17,9 +17,12 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.routing.RoutingTable;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.action.support.DefaultShardOperationFailedException;
+import org.opensearch.index.IndexModule;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.storage.common.tiering.TieringUtils;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.Collections;
@@ -123,7 +126,8 @@ public class TransportHotToWarmTierActionTests extends OpenSearchTestCase {
     }
 
     /**
-     * Removes the write block from the cluster state (same logic as TransportHotToWarmTierAction.removeWriteBlock).
+     * Removes the write block (same logic as TransportHotToWarmTierAction.removeWriteBlock). The tiering
+     * state is never mutated.
      */
     private ClusterState removeWriteBlock(ClusterState currentState, String indexName) {
         IndexMetadata indexMetadata = currentState.metadata().index(indexName);
@@ -192,6 +196,27 @@ public class TransportHotToWarmTierActionTests extends OpenSearchTestCase {
                 onFinalFailure.onResponse(new IllegalStateException(errorMsg, e));
             }
         });
+    }
+
+    /**
+     * The prepare request's timeout must be derived from the {@code cluster.tiering.prepare_timeout}
+     * cluster setting ({@link TieringUtils#PREPARE_TIERING_TIMEOUT}) — the same expression
+     * {@code executePrepareTiering} uses — and NOT the outer request's 30s AcknowledgedRequest default.
+     */
+    public void testPrepareRequestTimeout_DerivedFromPrepareTieringTimeoutSetting() {
+        // Default: 90s when the setting is unset (matches PREPARE_TIERING_TIMEOUT default).
+        PrepareTieringRequest defaultReq = new PrepareTieringRequest("test-dfa-index");
+        defaultReq.timeout(TieringUtils.PREPARE_TIERING_TIMEOUT.get(Settings.EMPTY));
+        assertEquals(TimeValue.timeValueSeconds(90), defaultReq.timeout());
+
+        // A custom (dynamic) value flows through to the prepare request.
+        Settings custom = Settings.builder().put(TieringUtils.PREPARE_TIERING_TIMEOUT_KEY, "75s").build();
+        PrepareTieringRequest customReq = new PrepareTieringRequest("test-dfa-index");
+        customReq.timeout(TieringUtils.PREPARE_TIERING_TIMEOUT.get(custom));
+        assertEquals(TimeValue.timeValueSeconds(75), customReq.timeout());
+
+        // Must not regress to the old 30s ack-timeout default.
+        assertNotEquals(TimeValue.timeValueSeconds(30), customReq.timeout());
     }
 
     /**
@@ -809,6 +834,60 @@ public class TransportHotToWarmTierActionTests extends OpenSearchTestCase {
         assertFalse(
             "Read-only setting must be false after removing a non-existent block",
             result.metadata().index(indexName).getSettings().getAsBoolean(IndexMetadata.INDEX_BLOCKS_WRITE_SETTING.getKey(), false)
+        );
+    }
+
+    // ── write-block add/remove ──────────────────────────────────────────────────
+
+    /** Adding the write block must set the write-block setting and cluster block without touching tiering state. */
+    public void testAddWriteBlock_SetsWriteBlock_DoesNotMutateTieringState() {
+        String indexName = "test-dfa-index";
+        ClusterState state = buildClusterStateWithDfaIndex(indexName, 1, 1);
+
+        ClusterState stateWithBlock = addReadOnlyBlock(state, indexName);
+
+        assertTrue("Write block must be present", stateWithBlock.blocks().hasIndexBlock(indexName, IndexMetadata.INDEX_WRITE_BLOCK));
+        assertTrue(
+            "Write-block setting must be true",
+            stateWithBlock.metadata().index(indexName).getSettings().getAsBoolean(IndexMetadata.INDEX_BLOCKS_WRITE_SETTING.getKey(), false)
+        );
+        assertNull(
+            "Tiering state must not be written when adding the write block",
+            stateWithBlock.metadata().index(indexName).getSettings().get(IndexModule.INDEX_TIERING_STATE.getKey())
+        );
+    }
+
+    /** Removing the write block must lift the block and leave the tiering state untouched. */
+    public void testRemoveWriteBlock_RemovesBlock_DoesNotMutateTieringState() {
+        String indexName = "test-dfa-index";
+        ClusterState state = buildClusterStateWithDfaIndex(indexName, 1, 1);
+
+        // Simulate the write block present and the tiering state already advanced to HOT_TO_WARM.
+        IndexMetadata indexMetadata = state.metadata().index(indexName);
+        Settings.Builder settings = Settings.builder()
+            .put(indexMetadata.getSettings())
+            .put(IndexMetadata.INDEX_BLOCKS_WRITE_SETTING.getKey(), true)
+            .put(IndexModule.INDEX_TIERING_STATE.getKey(), IndexModule.TieringState.HOT_TO_WARM.name());
+        Metadata metadata = Metadata.builder(state.metadata())
+            .put(IndexMetadata.builder(indexMetadata).settings(settings).settingsVersion(1 + indexMetadata.getSettingsVersion()))
+            .build();
+        ClusterBlocks blocks = ClusterBlocks.builder()
+            .blocks(state.blocks())
+            .addIndexBlock(indexName, IndexMetadata.INDEX_WRITE_BLOCK)
+            .build();
+        ClusterState blockedState = ClusterState.builder(state).metadata(metadata).blocks(blocks).build();
+
+        ClusterState result = removeWriteBlock(blockedState, indexName);
+
+        assertFalse("Write block must be removed", result.blocks().hasIndexBlock(indexName, IndexMetadata.INDEX_WRITE_BLOCK));
+        assertFalse(
+            "Write-block setting must be false after removal",
+            result.metadata().index(indexName).getSettings().getAsBoolean(IndexMetadata.INDEX_BLOCKS_WRITE_SETTING.getKey(), false)
+        );
+        assertEquals(
+            "Tiering state must be left untouched by write-block removal",
+            IndexModule.TieringState.HOT_TO_WARM.name(),
+            result.metadata().index(indexName).getSettings().get(IndexModule.INDEX_TIERING_STATE.getKey())
         );
     }
 

@@ -102,6 +102,7 @@ public abstract class TransportBroadcastByNodeAction<
     private final ClusterService clusterService;
     private final TransportService transportService;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
+    private final ThreadPool threadPool;
 
     final String transportNodeBroadcastAction;
 
@@ -132,6 +133,7 @@ public abstract class TransportBroadcastByNodeAction<
         this.clusterService = clusterService;
         this.transportService = transportService;
         this.indexNameExpressionResolver = indexNameExpressionResolver;
+        this.threadPool = transportService.getThreadPool();
 
         transportNodeBroadcastAction = actionName + "[n]";
 
@@ -234,6 +236,26 @@ public abstract class TransportBroadcastByNodeAction<
     protected abstract ShardOperationResult shardOperation(Request request, ShardRouting shardRouting) throws IOException;
 
     /**
+     * Async shard operation with ActionListener callback.
+     * Override this for non-blocking shard operations that should not tie up a thread while waiting.
+     * The default implementation delegates to the synchronous {@link #shardOperation(BroadcastRequest, ShardRouting)}.
+     * <p>
+     * When {@link #isAsyncShardOperation()} returns true, this method is called instead of
+     * {@link #shardOperation(BroadcastRequest, ShardRouting)} for each shard on the data node.
+     *
+     * @param request      the indices-level request
+     * @param shardRouting the shard on which to execute the operation
+     * @param listener     callback to invoke with the result or failure
+     */
+    protected void shardOperationAsync(Request request, ShardRouting shardRouting, ActionListener<ShardOperationResult> listener) {
+        try {
+            listener.onResponse(shardOperation(request, shardRouting));
+        } catch (Exception e) {
+            listener.onFailure(e);
+        }
+    }
+
+    /**
      * Determines the shards on which this operation will be executed on. The operation is executed once per shard.
      *
      * @param clusterState    the cluster state
@@ -249,6 +271,32 @@ public abstract class TransportBroadcastByNodeAction<
      * @param accumulatedExceptions List of any exceptions thrown by the shard-level operations.
      */
     protected void nodeOperation(List<ShardOperationResult> results, List<BroadcastShardOperationFailedException> accumulatedExceptions) {}
+
+    /**
+     * Returns true if shard operations should execute asynchronously on the data node.
+     * When true, each shard operation is submitted to the thread pool in parallel and the
+     * transport response is sent only after all shards complete (via CountDownLatch).
+     * This prevents long-running shard operations (e.g., flush + remote sync) from blocking
+     * the thread pool thread that received the transport request.
+     * <p>
+     * Default is false (synchronous, sequential execution) for backwards compatibility.
+     *
+     * @return true if shard operations should be dispatched asynchronously
+     */
+    protected boolean isAsyncShardOperation() {
+        return false;
+    }
+
+    /**
+     * Returns the thread pool name to use for async shard operations.
+     * Only used when {@link #isAsyncShardOperation()} returns true.
+     * Default is {@link ThreadPool.Names#GENERIC}.
+     *
+     * @return the thread pool name for async shard execution
+     */
+    protected String asyncShardOperationThreadPool() {
+        return ThreadPool.Names.GENERIC;
+    }
 
     /**
      * Executes a global block check before polling the cluster state.
@@ -480,12 +528,98 @@ public abstract class TransportBroadcastByNodeAction<
             }
             final Object[] shardResultOrExceptions = new Object[totalShards];
 
-            int shardIndex = -1;
-            for (final ShardRouting shardRouting : shards) {
-                shardIndex++;
-                onShardOperation(request, shardResultOrExceptions, shardIndex, shardRouting);
+            if (isAsyncShardOperation()) {
+                logger.info("[{}] executing async operation on [{}] shards", actionName, totalShards);
+                onAsyncShardOperation(request, channel, shards, totalShards, shardResultOrExceptions);
+            } else {
+                // Sync mode: original sequential execution (backwards compatible)
+                int shardIndex = -1;
+                for (final ShardRouting shardRouting : shards) {
+                    shardIndex++;
+                    onShardOperation(request, shardResultOrExceptions, shardIndex, shardRouting);
+                }
+                sendNodeResponse(request, channel, totalShards, shardResultOrExceptions);
             }
+        }
 
+        /**
+         * Dispatches each shard operation via shardOperationAsync with an ActionListener.
+         * Releases the calling thread immediately. An AtomicInteger tracks completion;
+         * the last shard to finish sends the transport response.
+         * Handles thread pool rejection gracefully by recording failed shards.
+         */
+        private void onAsyncShardOperation(
+            final NodeRequest request,
+            TransportChannel channel,
+            List<ShardRouting> shards,
+            int totalShards,
+            Object[] shardResultOrExceptions
+        ) {
+            final AtomicInteger remaining = new AtomicInteger(totalShards);
+            final String asyncPool = asyncShardOperationThreadPool();
+            int idx = 0;
+            for (final ShardRouting shardRouting : shards) {
+                final int shardIndex = idx++;
+                try {
+                    threadPool.executor(asyncPool).execute(() -> {
+                        shardOperationAsync(request.indicesLevelRequest, shardRouting, new ActionListener<ShardOperationResult>() {
+                            @Override
+                            public void onResponse(ShardOperationResult result) {
+                                shardResultOrExceptions[shardIndex] = result;
+                                if (remaining.decrementAndGet() == 0) {
+                                    try {
+                                        sendNodeResponse(request, channel, totalShards, shardResultOrExceptions);
+                                    } catch (IOException e) {
+                                        logger.warn("[{}] failed to send response after async shard operations", actionName);
+                                    }
+                                }
+                            }
+
+                            @Override
+                            public void onFailure(Exception e) {
+                                BroadcastShardOperationFailedException failure = new BroadcastShardOperationFailedException(
+                                    shardRouting.shardId(),
+                                    "operation " + actionName + " failed",
+                                    e
+                                );
+                                failure.setShard(shardRouting.shardId());
+                                shardResultOrExceptions[shardIndex] = failure;
+                                if (remaining.decrementAndGet() == 0) {
+                                    try {
+                                        sendNodeResponse(request, channel, totalShards, shardResultOrExceptions);
+                                    } catch (IOException ioEx) {
+                                        logger.warn("[{}] failed to send response after async shard failure", actionName);
+                                    }
+                                }
+                            }
+                        });
+                    });
+                } catch (Exception e) {
+                    // Thread pool rejected (full) — record as shard failure
+                    BroadcastShardOperationFailedException failure = new BroadcastShardOperationFailedException(
+                        shardRouting.shardId(),
+                        "operation " + actionName + " rejected by thread pool [" + asyncPool + "]",
+                        e
+                    );
+                    failure.setShard(shardRouting.shardId());
+                    shardResultOrExceptions[shardIndex] = failure;
+                    if (remaining.decrementAndGet() == 0) {
+                        try {
+                            sendNodeResponse(request, channel, totalShards, shardResultOrExceptions);
+                        } catch (IOException ioEx) {
+                            logger.warn("[{}] failed to send response after rejection", actionName);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void sendNodeResponse(
+            final NodeRequest request,
+            TransportChannel channel,
+            int totalShards,
+            Object[] shardResultOrExceptions
+        ) throws IOException {
             List<BroadcastShardOperationFailedException> accumulatedExceptions = new ArrayList<>();
             List<ShardOperationResult> results = new ArrayList<>();
             for (int i = 0; i < totalShards; i++) {

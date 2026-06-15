@@ -403,6 +403,7 @@ pub fn build_query_runtime_env(
     list_file_cache.put(&table_scoped_path, CachedFileList::new(object_metas.to_vec()));
 
     let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .with_object_store_registry(Arc::new(datafusion::execution::object_store::DefaultObjectStoreRegistry::new()))
         .with_cache_manager(
             CacheManagerConfig::default()
                 .with_list_files_cache(Some(list_file_cache))

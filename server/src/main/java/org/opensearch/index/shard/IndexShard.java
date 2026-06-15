@@ -6380,4 +6380,68 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public void setCompositeEngine(DataFormatAwareEngine unused) {
         throw new UnsupportedOperationException();
     }
+
+    /**
+     * Freezes this shard's engine in preparation for tiering.
+     *
+     * <p>Once frozen, no new merges can start, any in-flight merges are drained to completion, and
+     * late-arriving merge results are discarded, leaving the shard's segment state stable for
+     * tiering. Calling this explicitly makes the frozen state independent of cluster-state
+     * propagation timing. The operation is idempotent and is a no-op for engines that do not
+     * support tiering.
+     */
+    public void freezeForTiering() {
+        final Indexer engine = getIndexerOrNull();
+        if (engine instanceof DataFormatAwareEngine dfa) {
+            dfa.freezeForTiering();
+        }
+    }
+
+    /**
+     * Registers a listener that fires when all in-flight merge operations have completed.
+     * If merges are already drained (none active, none pending), returns true and the
+     * caller can proceed immediately. Otherwise, returns false and the listener will be
+     * invoked on the merge thread when the last merge finishes.
+     * <p>
+     * Only effective when the engine is a {@link DataFormatAwareEngine}; returns true
+     * (already drained) for other engine types since they don't use this merge scheduler.
+     *
+     * @param listener the callback to fire when merges are drained
+     * @return true if already drained, false if listener was registered
+     */
+    public boolean onMergesDrained(Runnable listener) {
+        final Indexer engine = getIndexerOrNull();
+        if (engine instanceof DataFormatAwareEngine dfa) {
+            return dfa.onMergesDrained(listener);
+        }
+        return true; // non-DFA engines have no merge scheduler — consider drained
+    }
+
+    /**
+     * Returns the number of currently active (in-flight) merge tasks.
+     * Returns 0 for non-DFA engines.
+     *
+     * @return the active merge count
+     */
+    public int getActiveMergeCount() {
+        final Indexer engine = getIndexerOrNull();
+        if (engine instanceof DataFormatAwareEngine dfa) {
+            return dfa.getActiveMergeCount();
+        }
+        return 0;
+    }
+
+    /**
+     * Returns the number of pending (queued but not yet started) merge tasks.
+     * Returns 0 for non-DFA engines.
+     *
+     * @return the pending merge count
+     */
+    public int getPendingMergeCount() {
+        final Indexer engine = getIndexerOrNull();
+        if (engine instanceof DataFormatAwareEngine dfa) {
+            return dfa.getPendingMergeCount();
+        }
+        return 0;
+    }
 }

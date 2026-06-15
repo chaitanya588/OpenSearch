@@ -94,8 +94,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.emptySet;
@@ -142,8 +144,23 @@ public class TransportBroadcastByNodeActionTests extends OpenSearchTestCase {
         Request,
         Response,
         TransportBroadcastByNodeAction.EmptyResult> {
-        private final Map<ShardRouting, Object> shards = new HashMap<>();
+        private final Map<ShardRouting, Object> shards = new ConcurrentHashMap<>();
         private final CounterMetric nodeOperationCount = new CounterMetric();
+        // When true, the node-level operation uses the async dispatch path (shardOperationAsync).
+        // Defaults to false so existing tests exercise the synchronous path unchanged.
+        private volatile boolean asyncMode = false;
+        private final AtomicInteger asyncShardCounter = new AtomicInteger(0);
+        // Async dispatch pool name. Defaults to GENERIC; a test can point it at an unknown pool
+        // to exercise the thread-pool-rejection branch of onAsyncShardOperation.
+        private volatile String asyncPoolName = ThreadPool.Names.GENERIC;
+
+        void enableAsyncMode() {
+            this.asyncMode = true;
+        }
+
+        void useAsyncPool(String poolName) {
+            this.asyncPoolName = poolName;
+        }
 
         TestTransportBroadcastByNodeAction(
             TransportService transportService,
@@ -195,6 +212,38 @@ public class TransportBroadcastByNodeActionTests extends OpenSearchTestCase {
                 OpenSearchException e = new OpenSearchException("operation failed");
                 shards.put(shardRouting, e);
                 throw e;
+            }
+        }
+
+        @Override
+        protected boolean isAsyncShardOperation() {
+            return asyncMode;
+        }
+
+        @Override
+        protected String asyncShardOperationThreadPool() {
+            return asyncPoolName;
+        }
+
+        /**
+         * Async variant used when {@link #asyncMode} is on. Completes deterministically:
+         * the first shard dispatched fails, the rest succeed — exercising both the success
+         * and the failure (BroadcastShardOperationFailedException) aggregation branches.
+         * Results are recorded so the test can derive the expected counts.
+         */
+        @Override
+        protected void shardOperationAsync(Request request, ShardRouting shardRouting, ActionListener<EmptyResult> listener) {
+            if (asyncMode == false) {
+                super.shardOperationAsync(request, shardRouting, listener);
+                return;
+            }
+            if (asyncShardCounter.getAndIncrement() == 0) {
+                OpenSearchException e = new OpenSearchException("operation failed");
+                shards.put(shardRouting, e);
+                listener.onFailure(e);
+            } else {
+                shards.put(shardRouting, Boolean.TRUE);
+                listener.onResponse(EmptyResult.INSTANCE);
             }
         }
 
@@ -474,6 +523,133 @@ public class TransportBroadcastByNodeActionTests extends OpenSearchTestCase {
         assertEquals(1, action.getNodeOperationCount());
     }
 
+    /**
+     * Drives the node-level operation through the async dispatch path (isAsyncShardOperation=true).
+     * Verifies that every shard is operated on via shardOperationAsync, results and failures are
+     * aggregated, the response is sent only after all shards complete, and nodeOperation runs once.
+     */
+    public void testOperationExecution_AsyncShardOperation() throws Exception {
+        action.enableAsyncMode();
+
+        ShardsIterator shardIt = clusterService.state().routingTable().allShards(new String[] { TEST_INDEX });
+        Set<ShardRouting> shards = new HashSet<>();
+        String nodeId = shardIt.iterator().next().currentNodeId();
+        for (ShardRouting shard : shardIt) {
+            if (nodeId.equals(shard.currentNodeId())) {
+                shards.add(shard);
+            }
+        }
+
+        final TransportBroadcastByNodeAction.BroadcastByNodeTransportRequestHandler handler =
+            action.new BroadcastByNodeTransportRequestHandler();
+
+        final PlainActionFuture<TransportResponse> future = PlainActionFuture.newFuture();
+        TestTransportChannel channel = new TestTransportChannel(future);
+
+        handler.messageReceived(action.new NodeRequest(nodeId, new Request(), new ArrayList<>(shards)), channel, null);
+
+        // Async path dispatches to the GENERIC pool; the response is only sent after all shards complete.
+        TransportResponse response = future.actionGet();
+        assertTrue(response instanceof TransportBroadcastByNodeAction.NodeResponse);
+        TransportBroadcastByNodeAction.NodeResponse nodeResponse = (TransportBroadcastByNodeAction.NodeResponse) response;
+
+        assertEquals("node id", nodeId, nodeResponse.getNodeId());
+        // Every shard on the node was operated on via the async path.
+        assertEquals(shards, action.getResults().keySet());
+
+        int successfulShards = 0;
+        int failedShards = 0;
+        for (Object result : action.getResults().values()) {
+            if (!(result instanceof OpenSearchException)) {
+                successfulShards++;
+            } else {
+                failedShards++;
+            }
+        }
+
+        assertEquals("total shards", shards.size(), nodeResponse.getTotalShards());
+        assertEquals("successful shards", successfulShards, nodeResponse.getSuccessfulShards());
+        assertEquals("failed shards", failedShards, nodeResponse.getExceptions().size());
+        // The async failure path wraps the cause in a BroadcastShardOperationFailedException.
+        List<BroadcastShardOperationFailedException> exceptions = nodeResponse.getExceptions();
+        for (BroadcastShardOperationFailedException exception : exceptions) {
+            assertThat(exception.getMessage(), is("operation indices:admin/test failed"));
+            assertThat(exception, hasToString(containsString("operation failed")));
+        }
+        // nodeOperation aggregation hook runs exactly once, after all async shards complete.
+        assertEquals(1, action.getNodeOperationCount());
+    }
+
+    /**
+     * Deterministic async aggregation: exactly one shard fails and one succeeds, guaranteeing both
+     * the onResponse and onFailure branches of onAsyncShardOperation execute regardless of the
+     * (random) cluster shape. The shard list is supplied directly to the NodeRequest.
+     */
+    public void testAsyncShardOperation_AggregatesSuccessAndFailure() throws Exception {
+        action.enableAsyncMode();
+
+        String nodeId = "test-node";
+        // Two primary shards on the same node. The async action fails exactly the first shard to
+        // execute (counter == 0) and succeeds the rest, so the outcome is 1 failure + 1 success.
+        ShardRouting shard0 = TestShardRouting.newShardRouting(TEST_INDEX, 0, nodeId, true, ShardRoutingState.STARTED);
+        ShardRouting shard1 = TestShardRouting.newShardRouting(TEST_INDEX, 1, nodeId, true, ShardRoutingState.STARTED);
+
+        final TransportBroadcastByNodeAction.BroadcastByNodeTransportRequestHandler handler =
+            action.new BroadcastByNodeTransportRequestHandler();
+        final PlainActionFuture<TransportResponse> future = PlainActionFuture.newFuture();
+        TestTransportChannel channel = new TestTransportChannel(future);
+
+        List<ShardRouting> shards = new ArrayList<>();
+        shards.add(shard0);
+        shards.add(shard1);
+        handler.messageReceived(action.new NodeRequest(nodeId, new Request(), shards), channel, null);
+
+        TransportResponse response = future.actionGet();
+        assertTrue(response instanceof TransportBroadcastByNodeAction.NodeResponse);
+        TransportBroadcastByNodeAction.NodeResponse nodeResponse = (TransportBroadcastByNodeAction.NodeResponse) response;
+
+        assertEquals("total shards", 2, nodeResponse.getTotalShards());
+        assertEquals("one shard succeeded", 1, nodeResponse.getSuccessfulShards());
+        List<BroadcastShardOperationFailedException> exceptions = nodeResponse.getExceptions();
+        assertEquals("one shard failed", 1, exceptions.size());
+        assertThat(exceptions.get(0).getMessage(), is("operation indices:admin/test failed"));
+        assertEquals(1, action.getNodeOperationCount());
+    }
+
+    /**
+     * Exercises the thread-pool rejection branch of onAsyncShardOperation. Pointing the async pool
+     * at an unknown name makes threadPool.executor(...) throw, which must be caught and recorded as
+     * a BroadcastShardOperationFailedException with a "rejected by thread pool" message — the node
+     * response is still sent and nodeOperation still runs.
+     */
+    public void testAsyncShardOperation_ThreadPoolRejection_RecordedAsFailure() throws Exception {
+        action.enableAsyncMode();
+        action.useAsyncPool("no_such_pool"); // unknown executor name → executor(...) throws → catch branch
+
+        String nodeId = "test-node";
+        ShardRouting shard = TestShardRouting.newShardRouting(TEST_INDEX, 0, nodeId, true, ShardRoutingState.STARTED);
+
+        final TransportBroadcastByNodeAction.BroadcastByNodeTransportRequestHandler handler =
+            action.new BroadcastByNodeTransportRequestHandler();
+        final PlainActionFuture<TransportResponse> future = PlainActionFuture.newFuture();
+        TestTransportChannel channel = new TestTransportChannel(future);
+
+        List<ShardRouting> shards = new ArrayList<>();
+        shards.add(shard);
+        handler.messageReceived(action.new NodeRequest(nodeId, new Request(), shards), channel, null);
+
+        TransportResponse response = future.actionGet();
+        assertTrue(response instanceof TransportBroadcastByNodeAction.NodeResponse);
+        TransportBroadcastByNodeAction.NodeResponse nodeResponse = (TransportBroadcastByNodeAction.NodeResponse) response;
+
+        assertEquals("total shards", 1, nodeResponse.getTotalShards());
+        assertEquals("no shard succeeded", 0, nodeResponse.getSuccessfulShards());
+        List<BroadcastShardOperationFailedException> exceptions = nodeResponse.getExceptions();
+        assertEquals("the rejected shard is recorded as a failure", 1, exceptions.size());
+        assertThat(exceptions.get(0).getMessage(), containsString("rejected by thread pool"));
+        assertEquals(1, action.getNodeOperationCount());
+    }
+
     public void testNodeLevelHookForMultiNode() throws Exception {
         // Manually send the request from coordinator --> target nodes, action.doExecute() does not do that in this test case setup
 
@@ -636,5 +812,43 @@ public class TransportBroadcastByNodeActionTests extends OpenSearchTestCase {
         Request request = new Request(TEST_INDEX);
         OptionallyResolvedIndices resolvedIndices = action.resolveIndices(request);
         assertEquals(ResolvedIndices.of(TEST_INDEX), resolvedIndices);
+    }
+
+    // ── Async shardOperationAsync tests ──────────────────────────────────────
+
+    /**
+     * Verifies that isAsyncShardOperation defaults to false.
+     */
+    public void testIsAsyncShardOperation_DefaultFalse() {
+        assertFalse("Default isAsyncShardOperation should be false", action.isAsyncShardOperation());
+    }
+
+    /**
+     * Verifies that asyncShardOperationThreadPool defaults to GENERIC.
+     */
+    public void testAsyncShardOperationThreadPool_DefaultGeneric() {
+        assertEquals(ThreadPool.Names.GENERIC, action.asyncShardOperationThreadPool());
+    }
+
+    /**
+     * Verifies that the default shardOperationAsync delegates to sync shardOperation
+     * and calls onResponse on success.
+     */
+    public void testShardOperationAsync_DefaultDelegatesToSync_Success() throws Exception {
+        Request request = new Request(TEST_INDEX);
+        ShardId shardId = new ShardId(new Index(TEST_INDEX, "_na_"), 0);
+        ShardRouting shardRouting = TestShardRouting.newShardRouting(shardId, "node1", true, ShardRoutingState.STARTED);
+
+        PlainActionFuture<TransportBroadcastByNodeAction.EmptyResult> future = new PlainActionFuture<>();
+        // action.shardOperation either returns EmptyResult or throws — the default shardOperationAsync wraps it
+        action.shardOperationAsync(request, shardRouting, future);
+
+        // The action's shardOperation randomly succeeds or fails — just verify listener was called
+        try {
+            future.actionGet();
+        } catch (Exception e) {
+            // Expected — the test action randomly throws. The key is that the listener was invoked.
+            assertNotNull("Exception should propagate through listener", e);
+        }
     }
 }

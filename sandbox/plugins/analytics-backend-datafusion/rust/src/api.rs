@@ -1309,6 +1309,7 @@ pub unsafe fn sql_to_substrait(
             CachedFileList::new(object_metas.as_ref().clone()),
         );
         let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+            .with_object_store_registry(Arc::new(datafusion::execution::object_store::DefaultObjectStoreRegistry::new()))
             .with_cache_manager(
                 CacheManagerConfig::default()
                     .with_list_files_cache(Some(list_file_cache))

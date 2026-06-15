@@ -204,7 +204,7 @@ public class MergeTests extends OpenSearchTestCase {
         OneMerge merge = new OneMerge(Collections.emptyList());
         handler.registerMerge(merge);
         handler.findAndRegisterMerges();
-        handler.onMergeFinished(merge);
+        handler.onMergeFinished(merge, false);
         handler.onMergeFailure(merge);
     }
 
@@ -253,7 +253,7 @@ public class MergeTests extends OpenSearchTestCase {
         handler.registerMerge(merge);
         assertTrue(handler.hasPendingMerges());
 
-        handler.onMergeFinished(merge);
+        handler.onMergeFinished(merge, false);
         assertFalse(handler.hasPendingMerges());
     }
 
