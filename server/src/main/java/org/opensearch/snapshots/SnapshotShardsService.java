@@ -64,11 +64,14 @@ import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexShardState;
 import org.opensearch.index.snapshots.IndexShardSnapshotStatus;
 import org.opensearch.index.snapshots.IndexShardSnapshotStatus.Stage;
+import org.opensearch.index.store.RemoteDirectory;
+import org.opensearch.index.store.RemoteSegmentStoreDirectory;
 import org.opensearch.index.store.remote.metadata.RemoteSegmentMetadata;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.repositories.IndexId;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.repositories.Repository;
+import org.opensearch.repositories.blobstore.BlobStoreRepository;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportException;
 import org.opensearch.transport.TransportRequestDeduplicator;
@@ -473,6 +476,10 @@ public class SnapshotShardsService extends AbstractLifecycleComponent implements
 
                     IndexMetadata indexMetadata = clusterService.state().metadata().index(indexId.getName());
 
+                    // POC (Approach 2A): for remote-store backed shards, let the repository copy already-uploaded
+                    // segment blobs store-side instead of re-uploading them from this node.
+                    final Runnable unregisterCopySource = registerServerSideCopySourceIfPossible(indexShard, repository, shardId);
+
                     repository.snapshotShard(
                         indexShard.store(),
                         indexShard.mapperService(),
@@ -483,7 +490,7 @@ public class SnapshotShardsService extends AbstractLifecycleComponent implements
                         snapshotStatus,
                         version,
                         userMetadata,
-                        ActionListener.runBefore(listener, wrappedSnapshot::close),
+                        ActionListener.runBefore(ActionListener.runBefore(listener, unregisterCopySource::run), wrappedSnapshot::close),
                         indexMetadata
                     );
                 }
@@ -493,6 +500,46 @@ public class SnapshotShardsService extends AbstractLifecycleComponent implements
             }
         } catch (Exception e) {
             listener.onFailure(e);
+        }
+    }
+
+    /**
+     * POC (Approach 2A): registers the shard's remote store as a store-side copy source on the repository, so
+     * {@code snapshotShard} can copy already-uploaded segment blobs straight into the snapshot repository.
+     * <p>
+     * A no-op (returning a no-op deregistration) unless the shard is remote-store backed and the repository is a
+     * {@link BlobStoreRepository}.
+     *
+     * @return a runnable that removes the registration once the shard snapshot completes
+     */
+    private Runnable registerServerSideCopySourceIfPossible(IndexShard indexShard, Repository repository, ShardId shardId) {
+        if (repository instanceof BlobStoreRepository == false) {
+            return () -> {};
+        }
+        if (indexShard.indexSettings().isAssignedOnRemoteNode() == false) {
+            return () -> {};
+        }
+        try {
+            final RemoteSegmentStoreDirectory remoteDirectory = indexShard.getRemoteDirectory();
+            // RemoteSegmentStoreDirectory is a FilterDirectory over the RemoteDirectory holding the uploaded segment
+            // data, so the delegate gives us the blob container addressing those blobs.
+            if (remoteDirectory.getDelegate() instanceof RemoteDirectory == false) {
+                return () -> {};
+            }
+            final RemoteDirectory dataDirectory = (RemoteDirectory) remoteDirectory.getDelegate();
+            final BlobStoreRepository blobStoreRepository = (BlobStoreRepository) repository;
+            blobStoreRepository.registerServerSideCopySource(
+                shardId,
+                new BlobStoreRepository.RemoteStoreSegmentSource(
+                    dataDirectory.getBlobContainer(),
+                    remoteDirectory::getExistingRemoteFilename
+                )
+            );
+            logger.debug("[{}] registered remote store as server-side copy source for snapshot", shardId);
+            return () -> blobStoreRepository.unregisterServerSideCopySource(shardId);
+        } catch (Exception e) {
+            logger.debug(() -> new ParameterizedMessage("[{}] could not register server-side copy source", shardId), e);
+            return () -> {};
         }
     }
 

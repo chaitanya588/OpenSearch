@@ -42,6 +42,7 @@ import software.amazon.awssdk.services.s3.model.CommonPrefix;
 import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
 import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectAttributesRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectAttributesResponse;
@@ -58,6 +59,7 @@ import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 import software.amazon.awssdk.services.s3.paginators.ListObjectsV2Iterable;
 import software.amazon.awssdk.services.s3.paginators.ListObjectsV2Publisher;
 import software.amazon.awssdk.utils.CollectionUtils;
+import software.amazon.awssdk.utils.http.SdkHttpUtils;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -149,6 +151,76 @@ class S3BlobContainer extends AbstractBlobContainer implements AsyncMultiStreamB
             return false;
         } catch (final Exception e) {
             throw new BlobStoreException("Failed to check if blob [" + blobName + "] exists", e);
+        }
+    }
+
+    /**
+     * Server-side copy from another S3 repository's container using S3 CopyObject. The request is signed with THIS
+     * (destination) repository's client, so that principal needs s3:GetObject on the source bucket/key (and
+     * kms:Decrypt on the source key when the source is SSE-KMS encrypted) in addition to write access here.
+     * Source and destination may be different buckets, different accounts and different credentials.
+     * <p>
+     * Returns false (never throws) when the source is not S3 or the copy is rejected, so the caller falls back to the
+     * regular streaming upload path.
+     */
+    @ExperimentalApi
+    @Override
+    public boolean tryServerSideCopy(BlobContainer sourceContainer, String sourceBlobName, String destBlobName, long blobSize) {
+        if (sourceContainer instanceof S3BlobContainer == false) {
+            logger.debug("server-side copy skipped: source container is not S3 [{}]", sourceContainer.getClass().getSimpleName());
+            return false;
+        }
+        final S3BlobContainer source = (S3BlobContainer) sourceContainer;
+        final String sourceBucket = source.blobStore.bucket();
+        final String sourceKey = source.buildKey(sourceBlobName);
+        final String destKey = buildKey(destBlobName);
+
+        final long startNanos = System.nanoTime();
+        try (AmazonS3Reference clientReference = blobStore.clientReference()) {
+            // Set copySource directly rather than sourceBucket/sourceKey. The SDK's request transformer only derives
+            // copySource when it is absent, and that derivation parses the bucket as a possible S3 access-point ARN via
+            // the optional software.amazon.awssdk:arns module, which repository-s3 does not bundle. Supplying
+            // copySource ourselves keeps the transformer a no-op and avoids that dependency.
+            final CopyObjectRequest.Builder builder = CopyObjectRequest.builder()
+                .copySource(SdkHttpUtils.urlEncodeIgnoreSlashes(sourceBucket + "/" + sourceKey))
+                .expectedSourceBucketOwner(source.blobStore.expectedBucketOwner())
+                .destinationBucket(blobStore.bucket())
+                .destinationKey(destKey)
+                .expectedBucketOwner(blobStore.expectedBucketOwner())
+                .storageClass(blobStore.getStorageClass())
+                .acl(blobStore.getCannedACL());
+            // Destination-side encryption settings: CopyObject decrypts with the source key and re-encrypts using
+            // whatever this request specifies, so the copied object lands under the destination repository's key.
+            SseKmsUtil.configureEncryptionSettings(builder, blobStore);
+
+            AccessController.doPrivileged(() -> clientReference.get().copyObject(builder.build()));
+
+            logger.info(
+                "server-side copy OK: s3://{}/{} -> s3://{}/{} [{} bytes, {} ms]",
+                sourceBucket,
+                sourceKey,
+                blobStore.bucket(),
+                destKey,
+                blobSize,
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos)
+            );
+            return true;
+        } catch (final Exception | LinkageError e) {
+            // LinkageError is caught deliberately: the copy is a best-effort optimization layered on the streaming
+            // path, so a missing optional SDK class must degrade to a fallback rather than reach the node's uncaught
+            // exception handler, which treats Errors on the snapshot thread as fatal and halts the node.
+            logger.warn(
+                () -> new ParameterizedMessage(
+                    "server-side copy FAILED: s3://{}/{} -> s3://{}/{} [{} bytes], falling back to streaming upload",
+                    sourceBucket,
+                    sourceKey,
+                    blobStore.bucket(),
+                    destKey,
+                    blobSize
+                ),
+                e
+            );
+            return false;
         }
     }
 

@@ -567,6 +567,13 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent imp
 
     private final SetOnce<BlobContainer> snapshotShardPathBlobContainer = new SetOnce<>();
 
+    /**
+     * POC (Approach 2A): per-shard remote-store sources registered for the duration of a shard snapshot. When a shard's
+     * segment data is already present in a remote store, {@link #snapshotFile} attempts a store-side copy from that
+     * remote store into this repository instead of streaming the bytes from the node.
+     */
+    private final Map<ShardId, RemoteStoreSegmentSource> serverSideCopySources = new ConcurrentHashMap<>();
+
     protected final SetOnce<BlobStoreProvider> blobStoreProvider = new SetOnce<>();
 
     protected final ClusterService clusterService;
@@ -4832,6 +4839,12 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent imp
     ) throws IOException {
         final BlobContainer shardContainer = shardContainer(indexId, shardId);
 
+        // POC (Approach 2A): if this shard's segments already live in a remote store, ask the blob store to copy the
+        // blob directly into the repository instead of streaming it from this node. Falls through on any failure.
+        if (tryServerSideCopyFile(fileInfo, shardId, shardContainer, snapshotStatus)) {
+            return;
+        }
+
         final String file = fileInfo.physicalName();
         try (IndexInput indexInput = store.openVerifyingInput(file, IOContext.DEFAULT, fileInfo.metadata())) {
             for (int i = 0; i < fileInfo.numberOfParts(); i++) {
@@ -4871,6 +4884,108 @@ public abstract class BlobStoreRepository extends AbstractLifecycleComponent imp
             failStoreIfCorrupted(store, t);
             snapshotStatus.addProcessedFile(0);
             throw t;
+        }
+    }
+
+    /**
+     * POC (Approach 2A): identifies where a shard's segment files already live in a remote store, so a shard snapshot
+     * can copy them store-side into this repository instead of re-uploading them from the node.
+     */
+    public static class RemoteStoreSegmentSource {
+        private final BlobContainer dataContainer;
+        private final Function<String, String> remoteFilenameResolver;
+
+        public RemoteStoreSegmentSource(BlobContainer dataContainer, Function<String, String> remoteFilenameResolver) {
+            this.dataContainer = dataContainer;
+            this.remoteFilenameResolver = remoteFilenameResolver;
+        }
+
+        BlobContainer dataContainer() {
+            return dataContainer;
+        }
+
+        /** Remote blob name for a local (physical) segment file name, or {@code null} if it is not uploaded. */
+        String remoteBlobName(String physicalName) {
+            return remoteFilenameResolver.apply(physicalName);
+        }
+    }
+
+    /**
+     * POC (Approach 2A): registers the remote-store source for a shard, enabling store-side copy for the shard snapshot.
+     * Must be paired with {@link #unregisterServerSideCopySource(ShardId)}.
+     */
+    public void registerServerSideCopySource(ShardId shardId, RemoteStoreSegmentSource source) {
+        serverSideCopySources.put(shardId, source);
+    }
+
+    public void unregisterServerSideCopySource(ShardId shardId) {
+        serverSideCopySources.remove(shardId);
+    }
+
+    /**
+     * POC (Approach 2A): attempts to populate {@code fileInfo} in the shard container by copying the already-uploaded
+     * blob from the shard's remote store, avoiding a read-and-reupload through this node.
+     * <p>
+     * Only single-part files are attempted; multi-part files (larger than {@code chunk_size}) fall back to the regular
+     * streaming path, as does any unresolved file or rejected copy.
+     *
+     * @return {@code true} if the file was fully populated by a store-side copy
+     */
+    private boolean tryServerSideCopyFile(
+        BlobStoreIndexShardSnapshot.FileInfo fileInfo,
+        ShardId shardId,
+        BlobContainer shardContainer,
+        IndexShardSnapshotStatus snapshotStatus
+    ) {
+        final RemoteStoreSegmentSource source = serverSideCopySources.get(shardId);
+        if (source == null) {
+            return false;
+        }
+        if (fileInfo.numberOfParts() != 1) {
+            logger.debug(
+                "[{}] server-side copy skipped for [{}]: {} parts, only single-part files are supported",
+                shardId,
+                fileInfo.physicalName(),
+                fileInfo.numberOfParts()
+            );
+            return false;
+        }
+        final String remoteBlobName = source.remoteBlobName(fileInfo.physicalName());
+        if (remoteBlobName == null) {
+            logger.debug("[{}] server-side copy skipped for [{}]: not present in remote store", shardId, fileInfo.physicalName());
+            return false;
+        }
+        try {
+            final boolean copied = shardContainer.tryServerSideCopy(
+                source.dataContainer(),
+                remoteBlobName,
+                fileInfo.partName(0),
+                fileInfo.length()
+            );
+            if (copied) {
+                snapshotStatus.addProcessedFile(fileInfo.length());
+                logger.info(
+                    "[{}] server-side copied [{}] ({} bytes) from remote store into repository [{}], no node transfer",
+                    shardId,
+                    fileInfo.physicalName(),
+                    fileInfo.length(),
+                    metadata.name()
+                );
+            }
+            return copied;
+        } catch (Exception | LinkageError e) {
+            // The copy is a best-effort optimization over the streaming path, so any failure - including a missing
+            // optional class in the repository plugin - must fall back rather than surface as a fatal error on the
+            // snapshot thread.
+            logger.warn(
+                () -> new ParameterizedMessage(
+                    "[{}] server-side copy failed for [{}], falling back to streaming upload",
+                    shardId,
+                    fileInfo.physicalName()
+                ),
+                e
+            );
+            return false;
         }
     }
 

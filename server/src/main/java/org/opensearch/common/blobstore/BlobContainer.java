@@ -147,6 +147,28 @@ public interface BlobContainer {
     void writeBlob(String blobName, InputStream inputStream, long blobSize, boolean failIfAlreadyExists) throws IOException;
 
     /**
+     * Attempts a server-side (store-side) copy of a blob from {@code sourceContainer} into this container, without
+     * routing the bytes through the node. Intended for cases where source and destination live in the same storage
+     * provider (for example two S3 repositories), so the provider can perform the copy internally.
+     * <p>
+     * Implementations MUST return {@code false} (rather than throwing) when the copy is not supported or not permitted
+     * for the given source, so callers can fall back to the regular read-then-write path. The default implementation
+     * returns {@code false}.
+     *
+     * @param sourceContainer container holding the source blob
+     * @param sourceBlobName  name of the blob in the source container
+     * @param destBlobName    name the blob should have in this container
+     * @param blobSize        size of the source blob in bytes
+     * @return {@code true} if the blob was copied server-side, {@code false} if the caller must fall back
+     * @throws IOException if the copy was attempted and failed in a way the caller should not retry
+     */
+    @ExperimentalApi
+    default boolean tryServerSideCopy(BlobContainer sourceContainer, String sourceBlobName, String destBlobName, long blobSize)
+        throws IOException {
+        return false;
+    }
+
+    /**
      * Reads blob content from the input stream and writes it to the container in a new blob with the given name, and metadata.
      * This method assumes the container does not already contain a blob of the same blobName. If a blob by the
      * same name already exists, the operation will fail and an {@link IOException} will be thrown.
